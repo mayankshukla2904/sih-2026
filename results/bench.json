@@ -1,5 +1,5 @@
 {
-  "measured_at": "2026-08-31T11:43:17+00:00",
+  "measured_at": "2026-09-20T12:17:40+00:00",
   "cpu_mhz": 240,
   "tflm": {
     "model": 43152,
@@ -7,19 +7,19 @@
     "arena_bytes": 65536
   },
   "warm_up": {
-    "mfcc": 30162,
-    "inv": 36743,
-    "pkw": 0.121
+    "mfcc": 30172,
+    "inv": 36755,
+    "pkw": 0.004
   },
   "bench": {
     "reps": 20,
-    "mfcc_min": 29974,
-    "mfcc_avg": 30024,
-    "mfcc_max": 30158,
-    "inv_min": 35943,
-    "inv_avg": 36129,
-    "inv_max": 36910,
-    "total": 66153,
+    "mfcc_min": 29993,
+    "mfcc_avg": 30137,
+    "mfcc_max": 32231,
+    "inv_min": 35995,
+    "inv_avg": 36108,
+    "inv_max": 36796,
+    "total": 66245,
     "period": 100000,
     "speech_cpu": 66.2,
     "arena_used": 57148,
@@ -33,20 +33,20 @@
     "kws": 1,
     "wakes": 0,
     "thr": 0.84,
-    "mfcc_us": 0,
-    "inv_us": 0,
-    "heap": 110284
+    "mfcc_us": 30398,
+    "inv_us": 39591,
+    "heap": 108996
   },
   "idle_cpu_pct": {
-    "n": 20,
-    "mean": 10.625,
-    "p50": 10.6,
-    "max": 10.8
+    "n": 1,
+    "mean": 0.4,
+    "p50": 0.4,
+    "max": 0.4
   },
   "idle_rms": {
-    "n": 20,
-    "mean": 0.0,
-    "p50": 0.0,
-    "max": 0.0
+    "n": 11,
+    "mean": 0.184,
+    "p50": 0.17,
+    "max": 0.284
   }
 }

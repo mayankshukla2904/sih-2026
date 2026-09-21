@@ -1,0 +1,44 @@
+{
+  "measured_at": "2026-09-20T18:11:47+00:00",
+  "run": "FAR-aware S3 fine-tune",
+  "command": "python -m training.train --finetune --epochs 10 --noise-cap 400 --min-mic-tpr 0.55",
+  "exported": false,
+  "reason": "S3 keyword_real TPR@0.5=0.4621, mean_pkw=0.4777; gate is TPR>=0.55 and mean_pkw>=0.35. INT8 on the chip is unchanged (models/marvin.int8.tflite mtime 20 Sep 22:46 IST).",
+  "callback": {
+    "metric": "TPR at p_keyword>=0.55 on S3-mic clips",
+    "far_cap": 0.03,
+    "best_epoch": 4,
+    "best_tpr": 0.4333,
+    "best_far": 0.0033,
+    "best_mean_pkw": 0.483
+  },
+  "disk_after_fit": {
+    "n_keyword_real": 290,
+    "mean_pkw": 0.4777,
+    "tpr_at_0_5": 0.4621,
+    "pred_silence_frac": 0.1724
+  },
+  "gsc_val_after_fit": {
+    "n": 11164,
+    "accuracy": 0.9923,
+    "tpr_at_0_65": 0.6154,
+    "far_at_0_65": 0.0003
+  },
+  "s3_mic_holdout_after_fit": {
+    "n": 1473,
+    "accuracy": 0.6375,
+    "tpr_at_0_65": 0.3552,
+    "far_at_0_65": 0.0017
+  },
+  "on_device_int8": {
+    "file": "models/marvin.int8.tflite",
+    "keyword_real_mean_pkw": 0.6542,
+    "keyword_real_tpr_at_0_5": 0.6724,
+    "firmware_faithful": {
+      "source": "results/tuning.json",
+      "knobs": "0.65/3/3",
+      "tpr": 0.7966,
+      "far_per_hour": 14.939
+    }
+  }
+}

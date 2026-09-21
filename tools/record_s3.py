@@ -166,9 +166,16 @@ def guided(dev: S3Audio, args: argparse.Namespace, out_dir: Path) -> None:
         dev.read_samples(lead)  # drop the keypress noise
         pcm = dev.read_samples(clip_n)
         rms, peak = level(pcm)
-        if peak >= 0.99:
-            print(f"    clipped (peak {peak:.2f}) — move back and redo")
+        # Firmware applies MIC_GAIN 12 before USB. A plosive or key-click that
+        # is only ~0.08 FS at the mic becomes peak 1.0 here, while 3 m speech
+        # RMS can still sit at 0.01. Redo only when the *whole clip* is loud.
+        if peak >= 0.99 and rms >= 0.05:
+            print(f"    actually loud (peak {peak:.2f} rms {rms:.4f}) — move back and redo")
             continue
+        if peak >= 0.99:
+            print(
+                f"    peak {peak:.2f} with rms {rms:.4f} — click/plosive after 12x mic gain, keeping"
+            )
         if rms < 0.004:
             print(f"    too quiet (rms {rms:.4f}) — probably missed it, redo")
             continue

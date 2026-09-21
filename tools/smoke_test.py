@@ -54,6 +54,14 @@ def test_protocol() -> None:
     assert pack_end() == b"\x00\x00"
 
 
+def _hop_rms(level: float, rng: np.random.Generator | None = None) -> np.ndarray:
+    if rng is None:
+        return np.full(HOP_SAMPLES, level, dtype=np.float32)
+    x = rng.normal(0.0, 1.0, HOP_SAMPLES).astype(np.float32)
+    cur = float(np.sqrt(np.mean(np.square(x))) + 1e-12)
+    return x * np.float32(level / cur)
+
+
 def test_stub_and_energy() -> None:
     gate = EnergyGate(threshold=0.01, consecutive=3)
     quiet = np.zeros(HOP_SAMPLES, dtype=np.float32)
@@ -72,6 +80,45 @@ def test_stub_and_energy() -> None:
     assert last.backend == "stub"
 
 
+def test_energy_gate_quiet_room_is_old_two_hop() -> None:
+    """3 m-quiet speech just above 0.015 must still open. Floor stays low."""
+    gate = EnergyGate()
+    hush = _hop_rms(0.008)
+    speech = _hop_rms(0.018)
+    assert gate.speechy(hush) is False
+    assert gate.speechy(speech) is False
+    assert gate.speechy(speech) is True
+    assert gate.noise_floor <= 0.030
+
+
+def test_energy_gate_hiss_stays_closed() -> None:
+    gate = EnergyGate()
+    hiss = _hop_rms(0.012)
+    for _ in range(10):
+        assert gate.speechy(hiss) is False
+
+
+def test_energy_gate_vetoes_steady_noise() -> None:
+    """After the floor catches a fan, a flat 0.15 RMS hop must not keep the CNN on."""
+    rng = np.random.default_rng(0)
+    gate = EnergyGate()
+    fan = lambda: _hop_rms(0.15, rng)
+    opened = False
+    closed = False
+    for i in range(500):
+        on = gate.speechy(fan())
+        if on:
+            opened = True
+        if i > 450 and not on:
+            closed = True
+    assert opened, "onset of the fan should still look like speech at first"
+    assert closed, "steady fan must be vetoed once the floor has adapted"
+    # Hits stay latched while the fan is loud, so a word-sized jump opens
+    # on the first hop — better TPR, still a subset of the old gate.
+    burst = _hop_rms(0.15 * 1.45, rng)
+    assert gate.speechy(burst) is True
+
+
 def test_int16_roundtrip() -> None:
     x = np.array([-1.0, -0.5, 0.0, 0.5, 1.0], dtype=np.float32)
     y = int16_to_float(float_to_int16(x))
@@ -83,5 +130,8 @@ if __name__ == "__main__":
     test_ring()
     test_protocol()
     test_stub_and_energy()
+    test_energy_gate_quiet_room_is_old_two_hop()
+    test_energy_gate_hiss_stays_closed()
+    test_energy_gate_vetoes_steady_noise()
     test_int16_roundtrip()
     print("smoke_test: all ok")

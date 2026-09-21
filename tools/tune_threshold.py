@@ -32,6 +32,7 @@ from node.capture import load_wav_mono_16k  # noqa: E402
 from node.features import features_from_clip  # noqa: E402
 from shared.config import DATA_DIR, KEYWORD, MODELS_DIR  # noqa: E402
 from shared.feature_spec import CLIP_SAMPLES, HOP_SAMPLES, SPEC  # noqa: E402
+from training.augment import match_train_level  # noqa: E402
 
 RESULTS = Path(__file__).resolve().parent.parent / "results"
 
@@ -59,6 +60,15 @@ class Int8Model:
         self.interp.invoke()
         raw = self.interp.get_tensor(self.out["index"])[0].astype(np.float32)
         return float((raw[0] - self.out_zp) * self.out_scale)
+
+
+    def p_all(self, feat: np.ndarray) -> tuple[float, float, float]:
+        q = np.round(feat[None, ...] / self.in_scale + self.in_zp).clip(-128, 127).astype(np.int8)
+        self.interp.set_tensor(self.inp["index"], q)
+        self.interp.invoke()
+        raw = self.interp.get_tensor(self.out["index"])[0].astype(np.float32)
+        p = (raw - self.out_zp) * self.out_scale
+        return float(p[0]), float(p[1]), float(p[2])
 
 
 def noise_floor(audio: np.ndarray) -> float:
@@ -94,7 +104,11 @@ def score_track(model: Int8Model, audio: np.ndarray) -> np.ndarray:
         audio = pad
     step = HOP_SAMPLES * INFER_EVERY_HOPS
     starts = range(0, len(audio) - CLIP_SAMPLES + 1, step)
-    return np.array([model.p_keyword(features_from_clip(audio[s : s + CLIP_SAMPLES])) for s in starts])
+    out = []
+    for s in starts:
+        clip = match_train_level(audio[s : s + CLIP_SAMPLES].astype(np.float32))
+        out.append(model.p_keyword(features_from_clip(clip)))
+    return np.array(out)
 
 
 def count_fires(track: np.ndarray, threshold: float, window: int, hits_needed: int) -> int:
@@ -162,6 +176,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--positive-cap", type=int, default=120, help="keyword clips to score")
     p.add_argument("--negative-cap", type=int, default=200, help="negative clips per folder")
     p.add_argument("--negative-dir", type=Path, nargs="*", default=None)
+    p.add_argument(
+        "--max-far-per-hour",
+        type=float,
+        default=1.0,
+        help="never recommend a setting above this false-accept rate (problem statement: near-zero)",
+    )
+    p.add_argument(
+        "--s3-only",
+        action="store_true",
+        help="score only INMP441 keyword_real vs unknown_real/silence_real/noise_real",
+    )
     p.add_argument("--out", type=Path, default=RESULTS / "tuning.json")
     return p.parse_args()
 
@@ -185,6 +210,13 @@ def main() -> int:
         root / "lookalike",
         root / "silence",
     ]
+    if args.s3_only:
+        pos_dirs = [root / "keyword_real"]
+        neg_dirs = [
+            root / "noise_real",
+            root / "unknown_real",
+            root / "silence_real",
+        ]
 
     print("scoring positives...")
     pos = load_positive_tracks(model, pos_dirs, args.positive_cap)
@@ -196,9 +228,9 @@ def main() -> int:
     print(f"{len(pos)} positive clips, {len(neg)} negative clips ({neg_seconds / 60:.1f} min)\n")
 
     rows = []
-    for window in (1, 3, 5, 7):
-        for hits_needed in (1, 2, 3, 4):
-            for threshold in np.arange(0.40, 0.96, 0.02):
+    for window in (1, 2, 3, 5):
+        for hits_needed in (1, 2, 3):
+            for threshold in np.arange(0.30, 0.86, 0.05):
                 thr = float(round(threshold, 2))
                 tp = sum(1 for t in pos if count_fires(t, thr, window, hits_needed) > 0)
                 fa = sum(count_fires(t, thr, window, hits_needed) for t in neg)
@@ -213,11 +245,10 @@ def main() -> int:
                     }
                 )
 
-    # Highest TPR wins, then fewest false accepts. Among settings that tie on both
-    # — which is what a saturated dataset produces — take the strictest one, because
-    # a threshold sitting right at the edge of the observed scores has no margin
-    # left for a voice or a room the sweep never saw.
-    def rank(r: dict) -> tuple:
+    # Highest TPR among settings that stay under the FAR budget. If nothing
+    # meets the budget, do not silently recommend a 100+/hr operating point —
+    # report the lowest-FAR setting and refuse to treat it as deployable.
+    def rank_tpr(r: dict) -> tuple:
         return (
             r["tpr"],
             -(r["far_per_hour"] or 0.0),
@@ -226,26 +257,49 @@ def main() -> int:
             r["smooth_window"],
         )
 
-    clean = [r for r in rows if (r["far_per_hour"] or 0) <= 1.0]
-    pool = clean or rows
-    best = max(pool, key=rank)
+    def rank_far(r: dict) -> tuple:
+        return (
+            -(r["far_per_hour"] or 0.0),
+            r["tpr"],
+            r["threshold"],
+            r["debounce_hits"],
+            r["smooth_window"],
+        )
+
+    budget = args.max_far_per_hour
+    clean = [r for r in rows if (r["far_per_hour"] or 0) <= budget]
+    budget_met = bool(clean)
+    pool = clean if budget_met else rows
+    best = max(pool, key=rank_tpr if budget_met else rank_far)
     n_tied = sum(
         1 for r in pool if r["tpr"] == best["tpr"] and (r["far_per_hour"] or 0) == (best["far_per_hour"] or 0)
     )
 
     print(f"{'thr':>5} {'win':>4} {'hits':>5} {'TPR':>7} {'FA':>5} {'FA/hr':>8}")
-    for r in sorted(pool, key=rank, reverse=True)[:12]:
+    shown = sorted(pool, key=rank_tpr if budget_met else rank_far, reverse=True)[:12]
+    for r in shown:
         print(
             f"{r['threshold']:>5.2f} {r['smooth_window']:>4} {r['debounce_hits']:>5} "
             f"{r['tpr']:>7.3f} {r['false_accepts']:>5} {r['far_per_hour']:>8.2f}"
         )
 
-    print("\nrecommended — paste into firmware/include/pins.h:")
-    print(f"  #define WAKE_SCORE_THRESHOLD {best['threshold']:.2f}f")
-    print(f"  #define SMOOTH_WINDOW {best['smooth_window']}")
-    print(f"  #define DEBOUNCE_HITS {best['debounce_hits']}")
-    print("and mirror them in shared/config.py.")
-    print(f"  at that setting: TPR={best['tpr']:.3f}  false accepts={best['far_per_hour']}/hr")
+    if budget_met:
+        print("\nrecommended — paste into firmware/include/pins.h:")
+        print(f"  #define WAKE_SCORE_THRESHOLD {best['threshold']:.2f}f")
+        print(f"  #define SMOOTH_WINDOW {best['smooth_window']}")
+        print(f"  #define DEBOUNCE_HITS {best['debounce_hits']}")
+        print("and mirror them in shared/config.py.")
+        print(f"  at that setting: TPR={best['tpr']:.3f}  false accepts={best['far_per_hour']}/hr")
+    else:
+        print(
+            f"\nNO setting meets FA/hr <= {budget:g}. Lowest FAR in the sweep is "
+            f"{best['far_per_hour']}/hr at thr={best['threshold']} win={best['smooth_window']} "
+            f"hits={best['debounce_hits']} (TPR={best['tpr']:.3f})."
+        )
+        print(
+            "Do not paste that into pins.h. Record more noise_real / lookalike_real "
+            "through the S3 mic (tools.record_s3 --label noise --continuous 600) and retrain."
+        )
     if n_tied > len(pool) // 4:
         print(
             f"\n  WARNING: {n_tied}/{len(pool)} settings tie on TPR and false accepts, so this\n"
@@ -265,8 +319,11 @@ def main() -> int:
                 "negative_minutes": round(neg_seconds / 60, 2),
                 "infer_every_hops": INFER_EVERY_HOPS,
                 "n_tied_with_recommended": n_tied,
-                "n_settings_swept": len(pool),
-                "recommended": best,
+                "n_settings_swept": len(rows),
+                "far_budget_per_hour": budget,
+                "budget_met": budget_met,
+                "recommended": best if budget_met else None,
+                "lowest_far": best if not budget_met else None,
                 "sweep": rows,
             },
             indent=2,

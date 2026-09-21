@@ -222,6 +222,234 @@
           ]
         }
       }
+    },
+    {
+      "measured_at": "2026-09-20T14:57:54+00:00",
+      "keyword": "marvin",
+      "speaker": "mayank",
+      "threshold": 0.84,
+      "idle_listen": {
+        "cpu": {
+          "n": 20,
+          "mean": 0.53,
+          "max": 0.6
+        },
+        "idle_cpu": {
+          "n": 20,
+          "mean": 0.505,
+          "max": 0.6
+        },
+        "rms": {
+          "n": 20,
+          "mean": 0.263,
+          "max": 0.604
+        },
+        "states": [
+          "listen",
+          "speech"
+        ],
+        "false_wakes": [],
+        "duration_s": 20.0
+      },
+      "overall": {
+        "n": 8,
+        "hits": 0,
+        "tpr": 0.0
+      },
+      "by_distance": {
+        "1m": {
+          "n": 8,
+          "hits": 0,
+          "tpr": 0.0,
+          "median_wake_latency_s": null,
+          "trials": [
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 4,
+                  "mean": 0.5,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 4,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 4,
+                  "mean": 0.379,
+                  "max": 0.583
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 4,
+                  "mean": 0.55,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 4,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 4,
+                  "mean": 0.243,
+                  "max": 0.375
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 3,
+                  "mean": 0.533,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 3,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 3,
+                  "mean": 0.195,
+                  "max": 0.289
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 3,
+                  "mean": 0.567,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 3,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 3,
+                  "mean": 0.201,
+                  "max": 0.355
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 4,
+                  "mean": 0.5,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 4,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 4,
+                  "mean": 0.24,
+                  "max": 0.311
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 4,
+                  "mean": 0.55,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 4,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 4,
+                  "mean": 0.332,
+                  "max": 0.636
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 3,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "idle_cpu": {
+                  "n": 3,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 3,
+                  "mean": 0.336,
+                  "max": 0.462
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            },
+            {
+              "hit": false,
+              "tel": {
+                "cpu": {
+                  "n": 3,
+                  "mean": 0.6,
+                  "max": 0.6
+                },
+                "idle_cpu": {
+                  "n": 3,
+                  "mean": 0.5,
+                  "max": 0.5
+                },
+                "rms": {
+                  "n": 3,
+                  "mean": 0.505,
+                  "max": 0.842
+                },
+                "states": [
+                  "speech"
+                ]
+              }
+            }
+          ]
+        }
+      }
     }
   ]
 }

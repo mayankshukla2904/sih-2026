@@ -1,11 +1,11 @@
 // Anuvani S3 listen node.
 //
-// Core 0 (this loop): I2S capture, RMS energy gate, ring buffer, KWS1 stream,
+// Core 0 (this loop): I2S capture, energy gate, ring buffer, KWS1 stream,
 //   TEL1 telemetry, serial commands. One 20 ms hop must never block.
 // Core 1 (kws_task): MFCC + INT8 DS-CNN-S through TFLM/ESP-NN. Takes tens of
 //   milliseconds, so it cannot run inside the audio loop.
 //
-// Idle (no speech): capture + RMS + memcpy only. Target < 10% of a 20 ms hop.
+// Idle (no speech): capture + RMS + cheap gate + ring push. Target < 10% CPU.
 // Wake-word audio is never sent anywhere; only post-wake audio opens KWS1.
 
 #include <Arduino.h>
@@ -18,6 +18,7 @@
 #include <driver/i2s.h>
 #include <math.h>
 
+#include "energy_gate.h"
 #include "kws.h"
 #include "oled.h"
 #include "pins.h"
@@ -38,7 +39,8 @@ static IPAddress g_asr;
 
 static int16_t g_ring[CLIP_SAMPLES];
 static int g_ring_fill = 0;
-static int g_energy_hits = 0;
+static int g_ring_write = 0;  // next write index; wrap, not a sliding memmove
+static EnergyGate g_gate;
 static int g_speech_hops = 0;
 static uint32_t g_last_wake_ms = 0;
 static bool g_streaming = false;
@@ -54,6 +56,7 @@ static volatile bool g_infer_fresh = false;
 static SemaphoreHandle_t g_infer_go = nullptr;
 
 static float g_kw = 0.0f;
+static uint32_t g_oled_wake_until = 0;
 static uint32_t g_last_mfcc_us = 0;
 static uint32_t g_last_invoke_us = 0;
 static uint32_t g_wake_count = 0;
@@ -117,15 +120,23 @@ static bool wifi_up() {
   if (WiFi.status() == WL_CONNECTED) {
     return true;
   }
-  log_line("wifi joining %s", WIFI_SSID);
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  const uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    delay(200);
+  // Non-blocking: a 20 s WiFi.begin wait froze MIC/STATUS and the audio loop.
+  static uint32_t attempt_ms = 0;
+  static bool joining = false;
+  const uint32_t now = millis();
+  if (!joining || now - attempt_ms >= 25000) {
+    log_line("wifi joining %s", WIFI_SSID);
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(true);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    attempt_ms = now;
+    joining = true;
   }
+  if (now - attempt_ms < 20000) {
+    return false;
+  }
+  joining = false;
   if (WiFi.status() != WL_CONNECTED) {
     log_line("wifi FAIL status=%d", (int)WiFi.status());
     return false;
@@ -169,13 +180,45 @@ static bool init_i2s() {
   return i2s_start(I2S_PORT) == ESP_OK;
 }
 
+static void ring_clear() {
+  memset(g_ring, 0, sizeof(g_ring));
+  g_ring_fill = 0;
+  g_ring_write = 0;
+}
+
 static void ring_push(const int16_t *hop) {
-  // Newest hop always sits at the end so MFCC sees a contiguous 1 s timeline.
-  memmove(g_ring, g_ring + HOP_SAMPLES, (CLIP_SAMPLES - HOP_SAMPLES) * sizeof(int16_t));
-  memcpy(g_ring + (CLIP_SAMPLES - HOP_SAMPLES), hop, HOP_SAMPLES * sizeof(int16_t));
+  // Circular: one 640-byte memcpy per hop instead of sliding 31 KB.
+  const int space = CLIP_SAMPLES - g_ring_write;
+  if (space >= HOP_SAMPLES) {
+    memcpy(g_ring + g_ring_write, hop, HOP_SAMPLES * sizeof(int16_t));
+    g_ring_write += HOP_SAMPLES;
+    if (g_ring_write >= CLIP_SAMPLES) {
+      g_ring_write = 0;
+    }
+  } else {
+    memcpy(g_ring + g_ring_write, hop, space * sizeof(int16_t));
+    memcpy(g_ring, hop + space, (HOP_SAMPLES - space) * sizeof(int16_t));
+    g_ring_write = HOP_SAMPLES - space;
+  }
   if (g_ring_fill < CLIP_SAMPLES) {
     g_ring_fill = min(CLIP_SAMPLES, g_ring_fill + HOP_SAMPLES);
   }
+}
+
+// Oldest-to-newest linear copy. CLIP_SAMPLES is not a multiple of HOP_SAMPLES,
+// so a wrap can fall mid-hop; handle that here, not on the 20 ms listen path.
+static void ring_copy_linear(int16_t *dst, int n) {
+  int start = g_ring_write - n;
+  if (start < 0) {
+    start += CLIP_SAMPLES;
+  }
+  if (start + n <= CLIP_SAMPLES) {
+    memcpy(dst, g_ring + start, n * sizeof(int16_t));
+    return;
+  }
+  const int first = CLIP_SAMPLES - start;
+  memcpy(dst, g_ring + start, first * sizeof(int16_t));
+  memcpy(dst + first, g_ring, (n - first) * sizeof(int16_t));
 }
 
 // 2.5 KB each. On the stack they overflowed loopTask's 8 KB; as statics they also
@@ -222,7 +265,7 @@ static float hop_capture(int16_t *hop_out) {
     memset(hop_out + got, 0, (HOP_SAMPLES - got) * sizeof(int16_t));
   }
   const int32_t mean = (int32_t)(sum / got);
-  double acc = 0;
+  int64_t acc = 0;
   float peak = 0.0f;
   for (int i = 0; i < got; ++i) {
     int32_t s = (g_hop_raw[i] - mean) * (int32_t)MIC_GAIN;
@@ -232,16 +275,21 @@ static float hop_capture(int16_t *hop_out) {
       s = -8388608;
     }
     hop_out[i] = (int16_t)(s >> 8);
-    const float f = (float)s / 8388608.0f;
-    acc += (double)f * f;
-    const float a = fabsf(f);
-    if (a > peak) {
-      peak = a;
+    const int32_t s16 = hop_out[i];
+    acc += (int64_t)s16 * (int64_t)s16;
+    if (g_mic_monitor) {
+      const float a = fabsf((float)s * (1.0f / 8388608.0f));
+      if (a > peak) {
+        peak = a;
+      }
     }
   }
-  g_mic_peak = peak;
-  g_mic_dc = mean;
-  return (float)sqrt(acc / got);
+  if (g_mic_monitor) {
+    g_mic_peak = peak;
+    g_mic_dc = mean;
+  }
+  // hop_out is s>>8, so /32768 matches the old 24-bit / 8388608 energy scale.
+  return sqrtf((float)acc / (float)got) * (1.0f / 32768.0f);
 }
 
 // --- inference on core 0 (Arduino loopTask is on core 1) ---------------------
@@ -294,7 +342,7 @@ static bool infer_request() {
   if (g_infer_busy) {
     return false;
   }
-  memcpy(g_infer_clip, g_ring, sizeof(g_infer_clip));
+  ring_copy_linear(g_infer_clip, CLIP_SAMPLES);
   clip_match_train_level(g_infer_clip, CLIP_SAMPLES);
   g_infer_busy = true;
   xSemaphoreGive(g_infer_go);
@@ -358,7 +406,8 @@ static bool stream_begin() {
   hdr[10] = (uint8_t)((sr >> 24) & 0xff);
   g_asr_tcp.write(hdr, sizeof(hdr));
 
-  const int16_t *pre = g_ring + (CLIP_SAMPLES - PREROLL_SAMPLES);
+  // g_infer_clip was linearized at the wake infer; last 500 ms is the preroll.
+  const int16_t *pre = g_infer_clip + (CLIP_SAMPLES - PREROLL_SAMPLES);
   for (int off = 0; off < PREROLL_SAMPLES; off += HOP_SAMPLES) {
     send_u16((uint16_t)(HOP_SAMPLES * 2));
     g_asr_tcp.write((const uint8_t *)(pre + off), HOP_SAMPLES * 2);
@@ -390,10 +439,9 @@ static void stream_end() {
   g_streaming = false;
   g_last_wake_ms = millis();
   kws_reset();
-  memset(g_ring, 0, sizeof(g_ring));
-  g_ring_fill = 0;
+  ring_clear();
   g_speech_hops = 0;
-  g_energy_hits = 0;
+  energy_gate_reset_hits(&g_gate);
   log_line("kws1 stream end");
 }
 
@@ -557,9 +605,9 @@ void setup() {
            (int)xPortGetCoreID(), KWS_TASK_CORE, (unsigned)getCpuFrequencyMhz());
 
   boot_step("clearing ring");
-  memset(g_ring, 0, sizeof(g_ring));
-  g_ring_fill = 0;
+  ring_clear();
   kws_reset();
+  energy_gate_init(&g_gate);
 
   boot_step("i2s");
   log_line("i2s pins SCK=%d WS=%d SD=%d (header numbers, not silkscreen)", PIN_I2S_SCK, PIN_I2S_WS, PIN_I2S_SD);
@@ -616,21 +664,16 @@ void loop() {
     static uint32_t last_mic = 0;
     if (millis() - last_mic >= 250) {
       last_mic = millis();
-      log_line("MIC rms=%.6f peak=%.4f dc=%.1f", rms, g_mic_peak, (double)g_mic_dc);
+      log_line("MIC rms=%.6f peak=%.4f dc=%.1f floor=%.5f speech=%.2f",
+               rms, g_mic_peak, (double)g_mic_dc, g_gate.noise_floor, g_gate.last_speech_ratio);
     }
   }
 
-  if (!wifi_up()) {
-    delay(1500);
-    return;
-  }
+  // Join Wi-Fi in the background. Keyword spotting must not wait on it:
+  // a reconnect after flash used to skip infer entirely, so marvin never fired.
+  wifi_up();
 
-  if (rms > ENERGY_RMS_THRESHOLD) {
-    g_energy_hits = min(ENERGY_CONSECUTIVE, g_energy_hits + 1);
-  } else {
-    g_energy_hits = max(0, g_energy_hits - 1);
-  }
-  const bool speechy = g_energy_hits >= ENERGY_CONSECUTIVE;
+  const bool maybe_word = energy_gate_update(&g_gate, hop, HOP_SAMPLES, rms);
 
   const char *state = "listen";
 
@@ -644,21 +687,17 @@ void loop() {
       stream_end();
       state = "listen";
     }
-  } else if (g_kws_ready && speechy && g_ring_fill >= CLIP_SAMPLES &&
+  } else if (g_kws_ready && maybe_word && g_ring_fill >= CLIP_SAMPLES &&
              millis() - g_last_wake_ms >= REFRACTORY_MS) {
-    // Infer as soon as the previous clip finishes (~67 ms). Do not queue a
-    // second clip while busy: that skipped the hop that contained marvin.
-    // Reset the smoother on speech onset so room-noise zeros cannot pull
-    // the average below threshold.
+    // Still LISTEN: looking for marvin. No bytes leave the chip.
     if (g_speech_hops == 0) {
       kws_reset();
     }
-    state = "speech";
     g_speech_hops++;
     infer_request();
   } else {
     g_speech_hops = 0;
-    if (!speechy) {
+    if (!maybe_word) {
       g_kw *= 0.85f;
     }
   }
@@ -678,7 +717,7 @@ void loop() {
                (unsigned)millis(), r.score, r.p_keyword, r.p_unknown, r.p_silence,
                (unsigned)r.mfcc_us, (unsigned)r.invoke_us);
       state = "wake";
-      oled_show(2, g_kw, cpu, true);
+      g_oled_wake_until = millis() + 2500;
       if (!stream_begin()) {
         g_last_wake_ms = millis();
       }
@@ -686,19 +725,26 @@ void loop() {
   }
 
   static uint32_t last_tel = 0;
-  if (strcmp(state, "listen") == 0) {
+  static uint32_t last_oled = 0;
+  if (!g_streaming) {
     g_idle_cpu = cpu;
   }
+
+  const bool show_wake = g_streaming || strcmp(state, "wake") == 0 ||
+                         millis() < g_oled_wake_until;
+  if (show_wake) {
+    state = "wake";
+  }
+
+  int mood = show_wake ? 2 : 0;
+  if (millis() - last_oled >= 1000) {
+    last_oled = millis();
+    oled_show(mood, g_kw, cpu, false);
+  }
+
   if (millis() - last_tel >= 1000) {
     last_tel = millis();
     send_tel(state, cpu, rms);
-    int mood = 0;
-    if (g_streaming || strcmp(state, "wake") == 0) {
-      mood = 2;
-    } else if (strcmp(state, "speech") == 0) {
-      mood = 1;
-    }
-    oled_show(mood, g_kw, cpu, false);
   }
 
   if (listen_us < 18000) {

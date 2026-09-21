@@ -8,6 +8,6 @@
 bool oled_begin();
 bool oled_present();
 
-// mood: 0 sleep, 1 speech, 2 awake. Redraws only when mood/score/cpu change
-// or when force is true. Keep this off the 20 ms hop except at 1 Hz.
+// mood: 0 listen (waiting for marvin), 2 awake (keyword hit). cpu_pct is
+// hop-loop idle duty. Redraws when mood/score/cpu (0.1%) change, or force.
 void oled_show(int mood, float kw_score, float cpu_pct, bool force);

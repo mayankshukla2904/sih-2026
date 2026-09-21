@@ -27,24 +27,33 @@
 #define HOP_SAMPLES 320
 #define CLIP_SAMPLES 15840
 #define PREROLL_SAMPLES 8000
-#define ENERGY_RMS_THRESHOLD 0.003f
-#define ENERGY_CONSECUTIVE 3
+// Skip the CNN only on true hiss so idle hop-CPU stays under 10%.
+// Do not raise this to keep a loud room at 0.4% — that misses marvin.
+#define ENERGY_RMS_THRESHOLD 0.015f
+#define ENERGY_CONSECUTIVE 2
+// Adaptive floor / onset / speech-band. Quiet rooms (floor below
+// ENERGY_NOISY_FLOOR) keep the two-hop RMS gate above, so TPR/FAR at
+// 0.65/3/3 do not move. Noisy rooms only *skip* inference on steady
+// non-speech; they never open the gate when the old rule would not.
+#define ENERGY_NOISY_FLOOR 0.030f
+#define ENERGY_ONSET_ABS 0.006f
+#define ENERGY_ONSET_REL 0.25f
+#define ENERGY_FLOOR_DOWN 0.90f
+#define ENERGY_FLOOR_UP 0.995f
+#define ENERGY_SPEECH_HP 0.8889f  // exp(-2*pi*300/16000)
+#define ENERGY_SPEECH_RATIO 0.55f
 #define INFER_EVERY_HOPS 5
-#define REFRACTORY_MS 1800
-// Hang up after this much quiet. Room noise sits ~0.01–0.02 FS after gain 12,
-// so STREAM_VOICE_RMS must be higher or last_voice never expires (12 s timeout).
+#define REFRACTORY_MS 1200
 #define SILENCE_END_MS 3500
 #define STREAM_VOICE_RMS 0.028f
 #define STREAM_TIMEOUT_MS 10000
 
-/*
- * 0.52 / 3 / 3 plus a keyword-vs-unknown margin: marvin still crosses for ~0.5 s,
- * one-frame TV/command spikes do not. Do not go back to 0.55 — that missed 1 m.
- */
-#define WAKE_SCORE_THRESHOLD 0.52f
+// S3 firmware-faithful sweep (results/tuning.json, 20 Sep 23:42 IST):
+// 0.35/1/1 → TPR 0.94 but 200 FA/h. 0.65/3/3 → TPR 0.80 at 15 FA/h.
+#define WAKE_SCORE_THRESHOLD 0.65f
 #define SMOOTH_WINDOW 3
 #define DEBOUNCE_HITS 3
-#define KWS_MARGIN 0.08f
+#define KWS_MARGIN 0.02f
 
 // After DC-block. 12x: 1 m speech lands near the close-mic MFCCs the net saw.
 #define MIC_GAIN 12

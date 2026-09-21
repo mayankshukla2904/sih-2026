@@ -118,6 +118,7 @@ def augment_waveform(
     p_noise: float = 0.8,
     gain_lo: float = 0.08,
     gain_hi: float = 1.15,
+    snr_db_range: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """Gain / shift / stretch / noise. Keeps length at CLIP_SAMPLES."""
     rng = rng or np.random.default_rng()
@@ -136,7 +137,8 @@ def augment_waveform(
         x = _fit(y, rng)
 
     if noise_bank is not None and rng.random() < p_noise:
-        snr = float(rng.uniform(*SNR_DB_RANGE))
+        lo, hi = snr_db_range if snr_db_range is not None else SNR_DB_RANGE
+        snr = float(rng.uniform(lo, hi))
         x = mix_at_snr(x, noise_bank.sample(), snr)
 
     return np.clip(x, -1.0, 1.0).astype(np.float32)

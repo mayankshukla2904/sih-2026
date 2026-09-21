@@ -232,12 +232,24 @@ def section_tuning(tuning: dict | None) -> list[str]:
         )
         lines.append("")
         return lines
-    best = tuning["recommended"]
+    best = tuning.get("recommended")
     lines.append(
         f"Swept {len(tuning['sweep'])} combinations over {tuning['n_positive_clips']} keyword clips "
         f"and {tuning['negative_minutes']} min of negatives, replaying the firmware's own smoothing "
         "and debounce logic."
     )
+    if not best:
+        lowest = tuning.get("lowest_far") or {}
+        budget = tuning.get("far_budget_per_hour", 1.0)
+        lines.append("")
+        lines.append(
+            f"No setting met FA/hr ≤ {budget}. Lowest FAR in the sweep: "
+            f"{lowest.get('far_per_hour')} /hr at threshold {lowest.get('threshold')} "
+            f"(TPR {lowest.get('tpr')}). Firmware keeps the deployed defaults until more "
+            "`noise_real` / `lookalike_real` is recorded through the S3 mic."
+        )
+        lines.append("")
+        return lines
     lines.append("")
     lines.append("| Knob | Deployed | Recommended |")
     lines.append("| --- | --- | --- |")

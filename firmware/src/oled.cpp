@@ -240,7 +240,8 @@ void oled_show(int mood, float kw_score, float cpu_pct, bool force) {
     return;
   }
   const int kw_i = (int)(kw_score * 100.0f + 0.5f);
-  const int cpu_i = (int)(cpu_pct + 0.5f);
+  // Tenths, so 0.4% idle is not rounded to C 0%.
+  const int cpu_i = (int)(cpu_pct * 10.0f + (cpu_pct >= 0 ? 0.5f : -0.5f));
   if (!force && mood == g_mood && kw_i == g_kw_i && cpu_i == g_cpu_i) {
     return;
   }
@@ -253,17 +254,13 @@ void oled_show(int mood, float kw_score, float cpu_pct, bool force) {
   face(mood);
   if (mood == 2) {
     text(64, 20, "AWAKE!");
-  } else if (mood == 1) {
-    text(64, 20, "SPEECH");
   } else {
     text(64, 20, "LISTEN");
   }
   char line[24];
-  snprintf(line, sizeof(line), "KW .%02d", kw_i > 99 ? 99 : (kw_i < 0 ? 0 : kw_i));
-  // "KW .72" style is confusing; print 0.72
   snprintf(line, sizeof(line), "K %.2f", (double)kw_score);
   text(64, 36, line);
-  snprintf(line, sizeof(line), "C %d%%", cpu_i);
+  snprintf(line, sizeof(line), "C %.1f%%", (double)cpu_pct);
   text(64, 50, line);
   flush();
 }

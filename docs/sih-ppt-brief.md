@@ -95,7 +95,7 @@ Keep this slide sparse. No architecture dump here.
 
 **Official heading:** Proposed Solution (Describe your Idea / Solution / Prototype)
 
-**One-line idea:** Always-on custom wake-word detection runs locally on a Pico-class MCU; only after wake does the node stream later audio to a remote ASR server.
+**One-line idea:** Always-on custom wake-word detection runs locally on an ESP32-S3; only after wake does the node stream later audio to a remote ASR server.
 
 **Bullets (max 6):**
 
@@ -103,8 +103,8 @@ Keep this slide sparse. No architecture dump here.
 - Custom keyword `[WAKE WORD]` — **not** Alexa / Hey Google pretrained models
 - Two stages: cheap energy gate → INT8 DS-CNN only on speech candidates
 - After wake: OLED `AWAKE` + start post-wake audio stream (ASR later)
-- Open-source stack only: Pico SDK + TensorFlow Lite Micro
-- Judged targets: RAM **&lt; 256 KB**, idle CPU **&lt; 10%**, near-zero false wakes
+- Open-source stack only: Arduino / TFLM + ESP-NN
+- Measured idle: **187.6 KB** RAM, **0.4%** CPU; clip TPR **0.80** at **15 FA/h** (not near-zero)
 
 **Diagram to draw (left-to-right, two boxes):**
 
@@ -143,7 +143,7 @@ POST-WAKE (only then)
 Tiny family) on TensorFlow Lite Micro with Espressif's ESP-NN kernels, static
 tensor arena, no heap in the hot path, no proprietary SDK. Vosk on the Pi. The
 model is trained by us on Speech Commands v2 *marvin* (INT8 DS-CNN-S) — nothing
-pretrained on a global wake word is used anywhere. Product name is Sahayak.
+pretrained on a global wake word is used anywhere. Product name is Anuvaani.
 
 **Methodology flowchart:**
 
@@ -180,22 +180,21 @@ the word is detected, so wake-word audio physically cannot leave the device.
 
 **Feasibility**
 
-- BOM ~**₹1,150**: Pico 2 W + INMP441 + SSD1306 (Robu / Hubtronics / Zbotic)
-- Same SDK if a Pico 1 is used for Phase 1; Pico 2 W is the CPU-safe target
-- Architecture already proven on Pico-class chips (I2S PIO + TFLM KWS)
-- Dataset: custom `[WAKE WORD]` clips on **this mic**, Speech Commands as unknown/silence (compliant)
+- BOM: ESP32-S3-DevKitC-1 + INMP441 + SSD1306 + Raspberry Pi 4B (ASR host)
+- Dual-core S3: listen hop on one core, INT8 CNN on the other
+- Dataset: `marvin` clips on **this** INMP441, Speech Commands as unknown/silence
 
 **Risks**
 
-- Idle CPU &lt; 10% is tight on RP2040 (M0+, no FPU) if CNN runs every frame
-- False accepts from TV / similar words
-- I2S clocking / mic bring-up on first hardware
+- Idle CPU if the CNN ran every 20 ms hop (~36 ms invoke)
+- False accepts from TV / similar words (`martin`, `marvel`)
+- Far-field TPR at 3 m (live at 0.65 not re-measured)
 
 **Mitigations**
 
-- Pico 2 W Cortex-M33 + energy gate + CMSIS-style kernels + smaller model if needed
-- Debounce + posterior smoothing; record negatives on the same INMP441
-- Phase 1: prove 16 kHz waveform on serial before any ML
+- Energy gate (quiet: two hops RMS > 0.015; noisy: plus onset / speech-band)
+- Knobs 0.65 / 3 / 3 from firmware-faithful sweep (TPR 0.80 @ 15 FA/h)
+- Extra 1 m / 3 m / lookalike / 10 min noise clips on disk; chip unchanged until S3 TPR@0.5 ≥ 0.67
 
 **Speaker notes (~30 s):** This is buildable with parts already in Indian maker shops. The real risk is idle CPU, not RAM — a full KWS stack is tens of KB against a 256 KB cap. We do not run the CNN on silence, and we pick the M33 board so the 10% idle number is honest.
 
@@ -232,10 +231,9 @@ Use links / citations, not a bibliography paragraph.
 
 - Zhang, Y. et al. **Hello Edge: Keyword Spotting on Microcontrollers** (2017) — DS-CNN architecture  
 - Banbury, C. et al. **MLPerf Tiny** — DS-CNN KWS reference (~38.6K params, INT8)  
-- **TensorFlow Lite for Microcontrollers** — SIH-allowed runtime, static tensor arena  
-- Warden, P. **Speech Commands** dataset — unknown / silence / negatives only  
-- TensorFlow blog: TinyML audio on **RP2040** (CMSIS-DSP features + TFLM)  
-- Open Pico I2S + INMP441 PIO/DMA examples (no closed voice SDK)
+- **TensorFlow Lite for Microcontrollers** + **ESP-NN** (S3 SIMD INT8 kernels)
+- Warden, P. **Speech Commands** dataset — unknown / silence / negatives only
+- Espressif ESP32-S3 + I2S INMP441 (no closed voice SDK)
 
 **Do not list:** Picovoice Porcupine, Alexa Voice Service, Google Assistant SDK, Hey Google / Alexa checkpoints.
 
@@ -248,58 +246,16 @@ Use links / citations, not a bibliography paragraph.
 - One accent color + dark/light from the official template. Do not restyle the chrome.
 - Architecture on slides 2 and 3 as **boxes and arrows**, not sentences.
 - Slide 4: three columns — Feasible / Risk / Mitigation.
-- Slide 5: numbers if you have them later (measured RAM, idle CPU %, FAR). Until measured, show **targets** clearly labeled as targets.
-- OLED mock: `STATUS: LISTENING` and `WAKE WORD DETECTED` — useful photo once hardware exists.
+- Slide 5: measured RAM **187.6 KB**, idle CPU **0.4%**, clip TPR **0.80** @ **15 FA/h**. Label live TPR/FAR and latency as unmeasured.
+- OLED mock: `LISTEN` + hop CPU, `AWAKE!` on a hit.
 - File size &lt; 10 MB.
 
 ---
 
-## Copy-paste prompt (Gamma / ChatGPT / Claude)
+## After the draft
 
-Paste this, then fill `[TEAM]`, `[INSTITUTE]`, `[WAKE WORD]`.
+Copy bullets from this file into the **official SIH template**. Numbers must match [`submission/00-evaluation-vs-ps.md`](../submission/00-evaluation-vs-ps.md). Do not invent TPR, FAR, idle CPU, or latency.
 
-```
-You are preparing the official Smart India Hackathon idea PPT.
-
-Hard rules:
-- Exactly 6 slides including title. Use the SIH official template headings; do not add slides.
-- PDF-ready. No paragraphs. Max 6 bullets per slide. Diagrams/infographics over text.
-- Body text >= 14pt. One color scheme. File under 10 MB.
-- Hardware category. Problem Statement ID 26172.
-
-Project (source of truth):
-Ultra-low-resource always-on custom wake-word detection on Raspberry Pi Pico 2 W
-(RP2350, Cortex-M33) + INMP441 I2S MEMS mic + SSD1306 OLED.
-Wake-word runs locally with TensorFlow Lite Micro + INT8 DS-CNN (Hello Edge /
-MLPerf Tiny family). No proprietary voice SDKs. No Alexa/Hey Google pretrained
-keywords. Custom keyword trained with Speech Commands as unknown/silence
-negatives. After wake, a second stage streams subsequent audio to a remote ASR
-server (not built in the first prototype).
-
-Judged constraints (PS 26172):
-- Total RAM < 256 KB
-- Idle listening CPU < 10%
-- High true-positive, near-zero false activations
-- Latency: keyword end → ASR server receiving the stream
-- Open-source TinyML stack only
-
-Slide 1 TITLE: PS 26172, idea title, theme, Hardware, team ID/name, institute.
-Slide 2 PROPOSED SOLUTION: one-line idea, how it addresses 26172, uniqueness, 2-stage diagram.
-Slide 3 TECHNICAL APPROACH: BOM + stack + pipeline flowchart (mic → DMA → energy gate → MFCC → INT8 CNN → debounce → OLED / ASR hook).
-Slide 4 FEASIBILITY: India-available BOM (~₹1150), risks (CPU, FAR), mitigations (M33, energy gate, on-device dataset).
-Slide 5 IMPACT: privacy, power, offline-until-wake, custom/Indic words, who benefits.
-Slide 6 REFERENCES: Hello Edge 2017, MLPerf Tiny KWS, TFLM, Speech Commands, Pico TFLM/I2S — no closed SDKs.
-
-Tone: measurable embedded TinyML, not a generic voice assistant. Never claim 25.6 KB RAM.
-Fill placeholders: team [TEAM], institute [INSTITUTE], wake word [WAKE WORD].
-Return slide-by-slide bullets plus speaker notes (about 30 seconds per slide).
-```
-
----
-
-## After you have a draft
-
-1. Drop the bullets into the **official template** (do not submit this markdown as the PPT).
-2. Replace targets with **measured** RAM / CPU / FAR once Phase 4 exists.
-3. Confirm `[WAKE WORD]` is not a global assistant phrase.
-4. Export PDF and check it is exactly 6 slides.
+1. Fill `[TEAM]`, `[TEAM ID]`, `[INSTITUTE]`, `[THEME]`. Spoken keyword is `marvin`.
+2. Confirm the wake word is not a global assistant phrase.
+3. Export PDF and check it is exactly 6 slides, file < 10 MB.

@@ -8,3 +8,8 @@ data/_cache/*.tar.gz
 assets/chime.wav
 firmware/include/wifi_secrets.h
 .env
+.cursor/
+.claude/
+models/*.prev
+models/*.rejected.json
+DOC-*.pdf

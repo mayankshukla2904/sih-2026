@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from shared.config import (  # noqa: E402
     SMOOTH_WINDOW,
     WAKE_SCORE_THRESHOLD,
 )
-from shared.feature_spec import CLIP_SAMPLES, FEATURE_SHAPE  # noqa: E402
+from shared.feature_spec import CLIP_SAMPLES, FEATURE_SHAPE, HOP_SAMPLES  # noqa: E402
 from training.augment import (  # noqa: E402
     NoiseBank,
     augment_waveform,
@@ -83,12 +84,14 @@ class Split:
         self.x: list[np.ndarray] = []
         self.y: list[int] = []
         self.real: list[bool] = []
+        self.mic: list[bool] = []
         self.speaker: list[str] = []
 
-    def add(self, feat: np.ndarray, label: int, real: bool, speaker: str) -> None:
+    def add(self, feat: np.ndarray, label: int, real: bool, speaker: str, mic: bool = False) -> None:
         self.x.append(feat)
         self.y.append(label)
         self.real.append(real)
+        self.mic.append(mic)
         self.speaker.append(speaker)
 
     def arrays(self):
@@ -97,11 +100,13 @@ class Split:
                 np.zeros((0, *FEATURE_SHAPE), np.float32),
                 np.zeros((0,), np.int32),
                 np.zeros((0,), bool),
+                np.zeros((0,), bool),
             )
         return (
             np.stack(self.x).astype(np.float32),
             np.array(self.y, np.int32),
             np.array(self.real, bool),
+            np.array(self.mic, bool),
         )
 
     def __len__(self) -> int:
@@ -133,7 +138,54 @@ def slice_noise_as_unknown(root: Path, cap: int) -> list[np.ndarray]:
     return out[:cap]
 
 
-def collect(keyword: str, holdout_speaker: str | None, noise_cap: int):
+def mine_hard_unknowns(root: Path, cap: int, keyword: str, pkw_min: float = 0.25) -> list[np.ndarray]:
+    """Keep noise windows the *current chip* INT8 already scores as keyword-ish.
+
+    These are the false-accept precursors: the model is already tempted, so
+    putting them in `unknown` is worth more than random TV slices.
+    """
+    if cap <= 0:
+        return []
+    tflite = MODELS_DIR / f"{keyword}.int8.tflite"
+    folder = root / "noise_real"
+    wavs = sorted(folder.glob("*.wav")) if folder.exists() else []
+    if not tflite.exists() or not wavs:
+        return []
+    import tensorflow as tf
+
+    interp = tf.lite.Interpreter(model_path=str(tflite))
+    interp.allocate_tensors()
+    inp = interp.get_input_details()[0]
+    out = interp.get_output_details()[0]
+    in_scale, in_zp = inp["quantization"]
+    out_scale, out_zp = out["quantization"]
+    rng = np.random.default_rng(7)
+    scored: list[tuple[float, np.ndarray]] = []
+    hop = HOP_SAMPLES
+    for wav in wavs:
+        audio = load_wav_mono_16k(wav)
+        if len(audio) < CLIP_SAMPLES:
+            continue
+        starts = list(range(0, len(audio) - CLIP_SAMPLES + 1, hop * 10))
+        if len(starts) > cap:
+            starts = [int(s) for s in rng.choice(starts, size=cap, replace=False)]
+        for s in starts:
+            clip = match_train_level(audio[int(s) : int(s) + CLIP_SAMPLES])
+            feat = features_from_clip(clip)
+            q = np.round(feat[None, ...] / in_scale + in_zp).clip(-128, 127).astype(np.int8)
+            interp.set_tensor(inp["index"], q)
+            interp.invoke()
+            raw = interp.get_tensor(out["index"])[0].astype(np.float32)
+            pkw = float((raw[0] - out_zp) * out_scale)
+            if pkw >= pkw_min:
+                scored.append((pkw, feat))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    kept = [feat for _, feat in scored[:cap]]
+    print(f"hard negatives from INT8: {len(kept)} / scored (pkw>={pkw_min}) from {len(wavs)} noise wavs")
+    return kept
+
+
+def collect(keyword: str, holdout_speaker: str | None, noise_cap: int, hard_neg_cap: int = 0):
     root = DATA_DIR / keyword
     if not root.exists():
         raise SystemExit(
@@ -157,7 +209,8 @@ def collect(keyword: str, holdout_speaker: str | None, noise_cap: int):
                 speakers.add(speaker)
             rel = f"{folder_name}/{wav.name}"
             # Speech Commands clips are real speakers (not our mic). Treat them as
-            # real so INT8 calibration and the metrics file say so.
+            # real so INT8 calibration and the metrics file say so. `mic` is only
+            # True for *_real folders recorded through the S3 INMP441.
             real = is_real or "_nohash_" in wav.stem or (val_set is not None)
             audio = load_wav_mono_16k(wav)
             if len(audio) < CLIP_SAMPLES:
@@ -174,15 +227,37 @@ def collect(keyword: str, holdout_speaker: str | None, noise_cap: int):
                 dest = val if rel in val_set else train
             else:
                 dest = val if (holdout_speaker and speaker == holdout_speaker) else train
-            dest.add(feat, label, real, speaker)
+            dest.add(feat, label, real, speaker, mic=is_real)
             # Far-field copies of the keyword only (2×). Val stays clean.
             if dest is train and label == 0:
                 for _ in range(2):
                     aug = augment_waveform(audio, noise_bank, rng, p_noise=0.9)
-                    dest.add(features_from_clip(match_train_level(aug)), label, real, speaker)
+                    dest.add(features_from_clip(match_train_level(aug)), label, real, speaker, mic=is_real)
+                # Quiet + noisy copies of *this mic* so 3 m after gain-match
+                # still looks like the word, not like close-mic silence.
+                if is_real:
+                    for _ in range(2):
+                        far = augment_waveform(
+                            audio,
+                            noise_bank,
+                            rng,
+                            p_noise=1.0,
+                            gain_lo=0.12,
+                            gain_hi=0.45,
+                            snr_db_range=(0.0, 10.0),
+                        )
+                        dest.add(
+                            features_from_clip(match_train_level(far)),
+                            label,
+                            real,
+                            speaker,
+                            mic=is_real,
+                        )
 
     for feat in slice_noise_as_unknown(root, noise_cap):
-        train.add(feat, 1, True, "noise")
+        train.add(feat, 1, True, "noise", mic=True)
+    for feat in mine_hard_unknowns(root, hard_neg_cap, keyword):
+        train.add(feat, 1, True, "hardneg", mic=True)
 
     if not len(train):
         raise SystemExit(f"{root} has no wav files")
@@ -216,18 +291,43 @@ def pick_holdout(root: Path, requested: str | None) -> str | None:
 class AugmentedBatches:
     """Feeds SpecAugment-masked batches. Regenerated every epoch by tf.data.
 
-    Keyword clips are oversampled 2× and masked more aggressively so the
-    minority class is not drowned by the unknown-word sea.
+    Keyword clips are oversampled 2×. S3-mic *keyword_real* is oversampled
+    extra so this microphone is not drowned by Speech Commands. Do not 4×
+    silence_real / unknown_real / noise slices — that taught the net
+    "this mic's colour → not keyword."
     """
 
-    def __init__(self, x: np.ndarray, y: np.ndarray, batch: int, seed: int = 0) -> None:
+    def __init__(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        batch: int,
+        mic: np.ndarray | None = None,
+        seed: int = 0,
+        mic_kw_extra: int = 5,
+        drop_gsc: bool = False,
+    ) -> None:
         self.x, self.y, self.batch = x, y, batch
+        self.mic = mic if mic is not None else np.zeros(len(y), dtype=bool)
         self.rng = np.random.default_rng(seed)
+        self.mic_kw_extra = mic_kw_extra
+        self.drop_gsc = drop_gsc
 
     def __call__(self):
+        if self.drop_gsc:
+            base = np.where(self.mic)[0]
+            if not len(base):
+                base = np.arange(len(self.x))
+        else:
+            base = np.arange(len(self.x))
         kw = np.where(self.y == 0)[0]
-        extra = self.rng.choice(kw, size=len(kw), replace=True) if len(kw) else np.zeros(0, int)
-        order = self.rng.permutation(np.concatenate([np.arange(len(self.x)), extra]))
+        mic_kw = np.where((self.y == 0) & self.mic)[0]
+        extras = [base]
+        if len(kw) and not self.drop_gsc:
+            extras.append(self.rng.choice(kw, size=len(kw), replace=True))
+        if len(mic_kw):
+            extras.append(self.rng.choice(mic_kw, size=max(1, len(mic_kw) * self.mic_kw_extra), replace=True))
+        order = self.rng.permutation(np.concatenate(extras))
         for i in range(0, len(order), self.batch):
             sel = order[i : i + self.batch]
             heavy = self.y[sel] == 0
@@ -243,6 +343,71 @@ class AugmentedBatches:
                     p=1.0,
                 )
             yield batch, self.y[sel]
+
+
+def peel_mic_val(
+    x: np.ndarray,
+    y: np.ndarray,
+    real: np.ndarray,
+    mic: np.ndarray,
+    frac: float = 0.25,
+    seed: int = 3,
+):
+    """Hold out a slice of S3-mic clips. GSC val cannot tell us if this mic works."""
+    rng = np.random.default_rng(seed)
+    hold: list[np.ndarray] = []
+    keep: list[np.ndarray] = []
+    for cls in range(N_CLASSES):
+        idx = np.where((y == cls) & mic)[0]
+        if len(idx) < 8:
+            keep.append(idx)
+            continue
+        rng.shuffle(idx)
+        n_h = max(4, int(round(len(idx) * frac)))
+        n_h = min(n_h, len(idx) - 4)
+        hold.append(idx[:n_h])
+        keep.append(idx[n_h:])
+    keep.append(np.where(~mic)[0])
+    keep_i = np.concatenate([a for a in keep if len(a)])
+    hold_i = np.concatenate(hold) if hold else np.zeros((0,), dtype=np.int64)
+    return (
+        x[keep_i],
+        y[keep_i],
+        real[keep_i],
+        mic[keep_i],
+        x[hold_i],
+        y[hold_i],
+    )
+
+
+def score_s3_keyword_real(model, keyword: str) -> dict:
+    """Disk check: the board's own keyword_real clips, not GSC val."""
+    folder = DATA_DIR / keyword / "keyword_real"
+    wavs = sorted(folder.glob("*.wav")) if folder.exists() else []
+    if not wavs:
+        return {"n": 0}
+    feats = []
+    for wav in wavs:
+        audio = load_wav_mono_16k(wav)
+        if len(audio) < CLIP_SAMPLES:
+            pad = np.zeros(CLIP_SAMPLES, np.float32)
+            pad[: len(audio)] = audio
+            audio = pad
+        else:
+            audio = audio[:CLIP_SAMPLES].astype(np.float32)
+        feats.append(features_from_clip(match_train_level(audio)))
+    x = np.stack(feats).astype(np.float32)
+    probs = model.predict(x, verbose=0)
+    pkw = probs[:, 0]
+    pred = probs.argmax(axis=1)
+    return {
+        "n": int(len(wavs)),
+        "mean_pkw": round(float(pkw.mean()), 4),
+        "median_pkw": round(float(np.median(pkw)), 4),
+        "tpr_at_0_5": round(float((pkw >= 0.5).mean()), 4),
+        "argmax_recall": round(float((pred == 0).mean()), 4),
+        "pred_silence_frac": round(float((pred == 2).mean()), 4),
+    }
 
 
 def wake_metrics(probs: np.ndarray, y: np.ndarray, threshold: float) -> dict:
@@ -333,7 +498,24 @@ def parse_args() -> argparse.Namespace:
         help="real speaker used as validation; default = last one found",
     )
     p.add_argument("--noise-cap", type=int, default=400, help="clips sliced out of noise_real/")
+    p.add_argument(
+        "--hard-neg-cap",
+        type=int,
+        default=250,
+        help="noise windows the current INT8 already scores as keyword-ish",
+    )
     p.add_argument("--no-specaugment", action="store_true")
+    p.add_argument(
+        "--min-mic-tpr",
+        type=float,
+        default=0.5,
+        help="refuse INT8 export unless S3 keyword_real TPR@0.5 is at least this",
+    )
+    p.add_argument(
+        "--finetune",
+        action="store_true",
+        help="load models/<kw>.keras and train on S3-mic clips (do not start from scratch)",
+    )
     return p.parse_args()
 
 
@@ -342,10 +524,10 @@ def main() -> None:
     root = DATA_DIR / args.keyword
     gsc_split_exists = (root / "split.json").exists()
     holdout = None if gsc_split_exists else pick_holdout(root, args.holdout_speaker)
-    train, val, speakers, gsc_split = collect(args.keyword, holdout, args.noise_cap)
+    train, val, speakers, gsc_split = collect(args.keyword, holdout, args.noise_cap, args.hard_neg_cap)
 
-    x_tr, y_tr, real_tr = train.arrays()
-    x_va, y_va, _ = val.arrays()
+    x_tr, y_tr, real_tr, mic_tr = train.arrays()
+    x_va, y_va, _, _ = val.arrays()
     preview = speakers[:8] + (["…"] if len(speakers) > 8 else [])
     print(f"real speakers found: {len(speakers)} {preview or ['none']}")
     if gsc_split:
@@ -358,19 +540,54 @@ def main() -> None:
         # No real speaker to hold out yet: keep a random slice so training is still scored.
         rng = np.random.default_rng(0)
         idx = rng.permutation(len(x_tr))
-        x_tr, y_tr, real_tr = x_tr[idx], y_tr[idx], real_tr[idx]
+        x_tr, y_tr, real_tr, mic_tr = x_tr[idx], y_tr[idx], real_tr[idx], mic_tr[idx]
         n_val = max(1, len(x_tr) // 8)
         x_va, y_va = x_tr[:n_val], y_tr[:n_val]
-        x_tr, y_tr, real_tr = x_tr[n_val:], y_tr[n_val:], real_tr[n_val:]
+        x_tr, y_tr, real_tr, mic_tr = x_tr[n_val:], y_tr[n_val:], real_tr[n_val:], mic_tr[n_val:]
 
-    print(f"train n={len(x_tr)} ({int(real_tr.sum())} real)  val n={len(x_va)}")
+    x_mic = np.zeros((0, *FEATURE_SHAPE), np.float32)
+    y_mic = np.zeros((0,), np.int32)
+    if (args.finetune or gsc_split) and int(mic_tr.sum()):
+        # Keep every S3 clip in train. GSC testing_list is already the val set.
+        # Holding out 25% of keyword_real was wasting the only on-mic positives.
+        x_mic, y_mic = x_tr[mic_tr], y_tr[mic_tr]
+        print(
+            f"S3-mic monitor n={len(x_mic)} (in-train, no peel) "
+            f"(kw={int((y_mic == 0).sum())} unk={int((y_mic == 1).sum())} sil={int((y_mic == 2).sum())})"
+        )
+    elif int(mic_tr.sum()) >= 16:
+        x_tr, y_tr, real_tr, mic_tr, x_mic, y_mic = peel_mic_val(x_tr, y_tr, real_tr, mic_tr)
+        print(
+            f"S3-mic holdout n={len(x_mic)} "
+            f"(kw={int((y_mic == 0).sum())} unk={int((y_mic == 1).sum())} sil={int((y_mic == 2).sum())})"
+        )
+
+    print(
+        f"train n={len(x_tr)} ({int(real_tr.sum())} real, {int(mic_tr.sum())} S3-mic)  "
+        f"val n={len(x_va)}"
+    )
     print("train class counts", {LABELS[i]: int((y_tr == i).sum()) for i in range(N_CLASSES)})
     print("val   class counts", {LABELS[i]: int((y_va == i).sum()) for i in range(N_CLASSES)})
 
     import tensorflow as tf
     from tensorflow import keras
 
-    model = build_dscnn_s()
+    # Train in float32. Sanjeet's notebook mixed_float16 / marvin.fp16.tflite is a
+    # host artefact. TFLM + ESP-NN on the S3 only accelerate INT8; we quantize
+    # after this fit. mixed_float16 on this Mac CPU is slower and can NaN.
+    keras_path = MODELS_DIR / f"{args.keyword}.keras"
+    if args.finetune:
+        if not keras_path.exists():
+            raise SystemExit(f"no {keras_path} to fine-tune")
+        model = keras.models.load_model(keras_path, compile=False)
+        print(f"fine-tune from {keras_path}")
+        for lyr in model.layers:
+            if lyr.__class__.__name__ == "BatchNormalization":
+                lyr.trainable = False
+        if abs(args.lr - 2e-3) < 1e-12:
+            args.lr = 1e-4
+    else:
+        model = build_dscnn_s()
     class KeywordRecall(keras.metrics.Metric):
         """Val accuracy is dominated by 'unknown'. This is the scored class."""
 
@@ -403,33 +620,71 @@ def main() -> None:
 
     counts = {i: int((y_tr == i).sum()) for i in range(N_CLASSES)}
     max_c = max(counts.values()) or 1
-    class_weight = {i: max_c / max(1, counts[i]) for i in range(N_CLASSES)}
-    # Extra lift on the keyword class — TPR is the judged accuracy metric.
-    class_weight[0] = class_weight[0] * 1.35
+    class_weight = {i: min(3.0, max_c / max(1, counts[i])) for i in range(N_CLASSES)}
+    class_weight[0] = class_weight[0] * (2.0 if args.finetune else 1.35)
     print("class_weight", class_weight)
 
     class BestWakeCallback(keras.callbacks.Callback):
-        """Ignore the all-keyword first epoch. Keep the best recall once val acc is real."""
+        """Keep the epoch that hears the S3 mic, not the GSC-val winner."""
 
-        def __init__(self, patience: int = 12, min_val_acc: float = 0.90) -> None:
+        def __init__(
+            self,
+            x_mic: np.ndarray,
+            y_mic: np.ndarray,
+            patience: int = 12,
+            min_val_acc: float = 0.85,
+        ) -> None:
             super().__init__()
+            self.x_mic = x_mic
+            self.y_mic = y_mic
             self.patience = patience
             self.min_val_acc = min_val_acc
             self.best = -1.0
             self.wait = 0
             self.best_weights = None
+            self._scored_start = False
+
+        def _s3_score(self) -> tuple[float, float, float, float]:
+            if not (len(self.x_mic) and int((self.y_mic == 0).sum())):
+                return 0.0, 0.0, 0.0, 0.0
+            probs = self.model.predict(self.x_mic, verbose=0)
+            kw = self.y_mic == 0
+            pkw = probs[:, 0]
+            tpr = float((pkw[kw] >= 0.55).mean())
+            far = float((pkw[~kw] >= 0.55).mean()) if int((~kw).sum()) else 0.0
+            mean_p = float(pkw[kw].mean())
+            rec = tpr if far <= 0.03 else tpr - 4.0 * (far - 0.03)
+            return rec, tpr, far, mean_p
+
+        def on_train_begin(self, logs=None):
+            rec, tpr, far, _mean_p = self._s3_score()
+            self.best_weights = [w.copy() for w in self.model.get_weights()]
+            self._scored_start = True
+            if rec > self.best:
+                self.best = rec
+            print(
+                f"  start S3 @0.55 TPR={tpr:.4f} FAR={far:.4f} score={rec:.4f} (floor)",
+                flush=True,
+            )
 
         def on_epoch_end(self, epoch, logs=None):
             logs = logs or {}
             acc = float(logs.get("val_accuracy") or 0.0)
             rec = float(logs.get("val_keyword_recall") or 0.0)
+            if len(self.x_mic) and int((self.y_mic == 0).sum()):
+                rec, tpr, far, mean_p = self._s3_score()
+                print(
+                    f"  S3 @0.55 TPR={tpr:.4f} FAR={far:.4f} mean_pkw={mean_p:.3f} "
+                    f"score={rec:.4f} (gsc val acc={acc:.4f})",
+                    flush=True,
+                )
             if acc < self.min_val_acc:
                 self.wait += 1
             elif rec > self.best + 1e-4:
                 self.best = rec
                 self.wait = 0
                 self.best_weights = [w.copy() for w in self.model.get_weights()]
-                print(f"  best val keyword recall={rec:.4f} (val acc={acc:.4f})", flush=True)
+                print(f"  best wake recall={rec:.4f} (val acc={acc:.4f})", flush=True)
             else:
                 self.wait += 1
             if self.wait >= self.patience:
@@ -437,13 +692,22 @@ def main() -> None:
                     f"Epoch {epoch + 1}: early stop, restoring recall={self.best:.4f}",
                     flush=True,
                 )
-                if self.best_weights is not None:
-                    self.model.set_weights(self.best_weights)
+                self._restore()
                 self.model.stop_training = True
+
+        def _restore(self) -> None:
+            if self.best_weights is not None:
+                self.model.set_weights(self.best_weights)
+
+        def on_train_end(self, logs=None):
+            # Fit can finish without hitting patience; still keep the FAR-capped peak.
+            if self.best_weights is not None:
+                print(f"restoring best wake recall={self.best:.4f}", flush=True)
+                self._restore()
 
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=6, min_lr=1e-5, verbose=1),
-        BestWakeCallback(patience=12),
+        BestWakeCallback(x_mic, y_mic, patience=12, min_val_acc=0.50 if args.finetune else 0.85),
     ]
 
     if args.no_specaugment:
@@ -458,8 +722,21 @@ def main() -> None:
             verbose=2,
         )
     else:
-        gen = AugmentedBatches(x_tr, y_tr, args.batch)
-        steps = max(1, len(x_tr) // args.batch)
+        gen = AugmentedBatches(
+            x_tr,
+            y_tr,
+            args.batch,
+            mic=mic_tr,
+            mic_kw_extra=12 if args.finetune else 8,
+            drop_gsc=False,
+        )
+        n_mic_kw = int(((y_tr == 0) & mic_tr).sum())
+        n_kw = int((y_tr == 0).sum())
+        n_mic = int(mic_tr.sum())
+        extra = n_mic_kw * (12 if args.finetune else 8)
+        epoch_n = len(x_tr) + n_kw + extra
+        steps = max(1, epoch_n // args.batch)
+        print(f"steps/epoch={steps} (keyword_real oversample n={n_mic_kw} finetune={args.finetune})", flush=True)
         ds = (
             tf.data.Dataset.from_generator(
                 gen,
@@ -483,8 +760,7 @@ def main() -> None:
 
     MODELS_DIR.mkdir(exist_ok=True)
     keras_path = MODELS_DIR / f"{args.keyword}.keras"
-    model.save(keras_path)
-    print(f"wrote {keras_path}")
+    keras_prev = MODELS_DIR / f"{args.keyword}.keras.prev"
 
     metrics = {
         "keyword": args.keyword,
@@ -503,12 +779,47 @@ def main() -> None:
     real_val = val.arrays()[2] if len(val) else None
     if real_val is not None and len(x_va) and bool(real_val.all()):
         metrics["val_is_real_speaker"] = True
+    if len(x_mic):
+        got = report(model, x_mic, y_mic, "s3_mic_holdout")
+        if got:
+            metrics["splits"].append(got)
+    metrics["n_s3_mic_train"] = int(mic_tr.sum())
+    mic_disk = score_s3_keyword_real(model, args.keyword)
+    metrics["s3_keyword_real"] = mic_disk
+    print(
+        f"S3 keyword_real disk: n={mic_disk.get('n', 0)} "
+        f"mean_pkw={mic_disk.get('mean_pkw')} "
+        f"TPR@0.5={mic_disk.get('tpr_at_0_5')} "
+        f"silence_frac={mic_disk.get('pred_silence_frac')}"
+    )
 
     metrics_path = MODELS_DIR / f"{args.keyword}.metrics.json"
+    metrics_prev = MODELS_DIR / f"{args.keyword}.metrics.json.prev"
+    if metrics_path.exists():
+        shutil.copy2(metrics_path, metrics_prev)
     metrics_path.write_text(json.dumps(metrics, indent=2))
     print(f"wrote {metrics_path}")
 
-    save_representative(x_tr[real_tr], x_tr, MODELS_DIR / f"{args.keyword}.rep.npy")
+    tpr = float(mic_disk.get("tpr_at_0_5") or 0.0)
+    mean_p = float(mic_disk.get("mean_pkw") or 0.0)
+    if mic_disk.get("n", 0) and (tpr < args.min_mic_tpr or mean_p < 0.35):
+        rejected = MODELS_DIR / f"{args.keyword}.metrics.rejected.json"
+        shutil.copy2(metrics_path, rejected)
+        if metrics_prev.exists():
+            shutil.copy2(metrics_prev, metrics_path)
+            print(f"restored {metrics_path} from previous checkpoint", flush=True)
+        raise SystemExit(
+            f"refusing INT8 export: S3 keyword_real TPR@0.5={tpr:.3f} "
+            f"mean_pkw={mean_p:.3f} (need TPR>={args.min_mic_tpr} and mean_pkw>=0.35). "
+            "Keras and the chip stay on the previous model."
+        )
+
+    mic_rep = x_tr[mic_tr] if int(mic_tr.sum()) else x_tr[real_tr]
+    save_representative(mic_rep, x_tr, MODELS_DIR / f"{args.keyword}.rep.npy")
+    if keras_path.exists():
+        shutil.copy2(keras_path, keras_prev)
+    model.save(keras_path)
+    print(f"wrote {keras_path}")
 
     from training.export_firmware import export_all
 

@@ -6,7 +6,7 @@ problem, the theory, the hardware, and every decision.
 ## ESP32-S3 (node, already flashed)
 
 USB-C is enough to talk to the board. This is an **S3 DevKit**, not Nano.
-Wire the INMP441 to header pins **4 / 5 / 6** (SCK / WS / SD). 3.3 V only.
+Wire the INMP441 to header pins **15 / 16 / 17** (SCK / WS / SD). 3.3 V only. GPIO 4/5/6 stayed silent on this DevKit.
 
 ```bash
 source .venv/bin/activate
