@@ -61,7 +61,7 @@ Held-out `speech_commands_testing_list`, speaker-disjoint. Figures below are fro
 
 S3-mic `keyword_real` **at that export**: n=290, mean p(keyword)=0.6542, TPR@0.5=0.6724, argmax recall=0.6828.
 
-On disk 21 Sep, not yet in this table or on the chip: **330** keyword clips (`mayank` 210, `mayank1m` 80, `mayank3m` 40), **189** unknown, **45** lookalike (`martin` / `marvel`), **55** silence, **4** noise wavs (longest ~10 min). A from-scratch train on that set is in progress; export still requires TPR@0.5 ≥ 0.67.
+On disk 21 Sep, not yet in this table or on the chip: **330** keyword clips (`mayank` 210, `mayank1m` 80, `mayank3m` 40), **189** unknown, **45** lookalike (`martin` / `marvel`), **55** silence, **4** noise wavs (longest ~10 min). A 25-epoch from-scratch train on that set **refused** INT8 export (TPR@0.5=0.455 < 0.67).
 
 INT8 vs float, 200 representative clips (`marvin.int8_parity.json`): argmax agreement **0.98**; mean \|Δ p_keyword\| 0.01578; max 0.24516.
 

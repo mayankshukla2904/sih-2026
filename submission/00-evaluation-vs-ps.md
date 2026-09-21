@@ -2,7 +2,7 @@
 
 **Source of truth:** official text of PS **SIH26172** (ISRO) on [sih.gov.in/sih2026PS](https://sih.gov.in/sih2026PS), copied verbatim in `docs/problem-statement.md`. Team-chosen targets that are **not** in that text are labelled as such.
 
-**Snapshot date:** 21 September 2026. Keyword on device: `marvin`. Firmware knobs: `WAKE_SCORE_THRESHOLD 0.65`, `SMOOTH_WINDOW 3`, `DEBOUNCE_HITS 3`, `ENERGY_RMS_THRESHOLD 0.015`, `ENERGY_CONSECUTIVE 2`, `KWS_MARGIN 0.02`. Adaptive gate (noisy rooms only): `ENERGY_NOISY_FLOOR 0.030`, onset 0.006 / 0.25× floor, speech-band 300 Hz. INT8 on the chip is still the **20 Sep 22:46 IST** export. A 21 Sep from-scratch train on new 3 m / lookalike / noise clips has **not** replaced it.
+**Snapshot date:** 21 September 2026. Keyword on device: `marvin`. Firmware knobs: `WAKE_SCORE_THRESHOLD 0.65`, `SMOOTH_WINDOW 3`, `DEBOUNCE_HITS 3`, `ENERGY_RMS_THRESHOLD 0.015`, `ENERGY_CONSECUTIVE 2`, `KWS_MARGIN 0.02`. Adaptive gate (noisy rooms only): `ENERGY_NOISY_FLOOR 0.030`, onset 0.006 / 0.25× floor, speech-band 300 Hz. INT8 on the chip is still the **20 Sep 22:46 IST** export. A 21 Sep from-scratch train on the larger S3 set **refused** INT8 export (TPR@0.5=**0.455** on 330 clips, need ≥ 0.67).
 
 **Overall:** the pipeline matches the binding software and architecture requirements. Official idle-efficiency limits are met on the ESP32-S3. Firmware-faithful clip TPR at the deployed knobs is **0.80** with **15 false accepts / hour** on S3-mic negatives. Live room TPR/FAR at **0.65 / 3 / 3** has **not** been re-measured. Keyword-end → ASR latency has **not** been measured. ASR is LAN-hosted Vosk, not cloud — disclosed below.
 
@@ -124,7 +124,7 @@ That log does **not** apply to 0.65 / 3 / 3. The current FAR evidence is the S3-
 
 **Partial.** Firmware-faithful TPR at the deployed knobs is 0.80 with FAR held to the 15/h cap. That is not yet “high TPR with near-zero false activations,” and live-room confirmation is missing. Do not say FAR is near zero.
 
-FAR-aware S3 fine-tune (20 Sep 23:11–23:41 IST) did **not** export. Peak S3 TPR@0.55 was 0.43 with FAR 0.003; disk TPR@0.5 fell to 0.46. A 21 Sep from-scratch train on the larger S3 set is **running** and has **not** replaced the chip; export still requires TPR@0.5 ≥ **0.67**. The chip still runs the 20 Sep 22:46 INT8. Log of the refused fine-tune: `results/far_aware_finetune.json`.
+FAR-aware S3 fine-tune (20 Sep 23:11–23:41 IST) did **not** export. Peak S3 TPR@0.55 was 0.43 with FAR 0.003; disk TPR@0.5 fell to 0.46. A 21 Sep from-scratch 25-epoch train on 330 keyword + lookalike + 10 min noise **refused** INT8 export: S3 TPR@0.5=**0.455**, mean p(keyword)=**0.470** (need ≥ 0.67). Best in-train S3 TPR@0.55 was **0.368**. The chip still runs the 20 Sep 22:46 INT8. Log of the refused fine-tune: `results/far_aware_finetune.json`.
 
 Always-on second neural net: **not implemented**. DS-CNN invoke is ~36 ms; a 20 ms hop only allows ~2 ms under a 10% idle cap. First stage on device is the energy gate, not a tiny keyword CNN.
 

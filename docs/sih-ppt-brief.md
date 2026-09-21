@@ -194,7 +194,7 @@ the word is detected, so wake-word audio physically cannot leave the device.
 
 - Energy gate (quiet: two hops RMS > 0.015; noisy: plus onset / speech-band)
 - Knobs 0.65 / 3 / 3 from firmware-faithful sweep (TPR 0.80 @ 15 FA/h)
-- Extra 1 m / 3 m / lookalike / 10 min noise clips on disk; chip unchanged until S3 TPR@0.5 ≥ 0.67
+- Extra 1 m / 3 m / lookalike / 10 min noise clips on disk; 21 Sep train refused export (TPR@0.5 0.455 < 0.67)
 
 **Speaker notes (~30 s):** This is buildable with parts already in Indian maker shops. The real risk is idle CPU, not RAM — a full KWS stack is tens of KB against a 256 KB cap. We do not run the CNN on silence, and we pick the M33 board so the 10% idle number is honest.
 

@@ -112,7 +112,7 @@ The mismatch that remains: **clip-level Speech Commands accuracy did not fully t
 
 ## 5. Open questions (not claimed as done)
 
-1. The 20 Sep FAR-aware fine-tune was refused (TPR@0.5 0.46 < 0.55). Export now requires TPR@0.5 ≥ **0.67** (the on-device INT8). A 21 Sep from-scratch run on 3 m + lookalike + 10 min noise was started; it does not replace the chip unless it beats that gate. `models/marvin.keras` on disk may be a **refused** checkpoint — the flashed graph is `models/marvin.int8.tflite` (20 Sep 22:46 IST).
+1. Two trains since the flashed INT8 have **refused** export: 20 Sep FAR-aware fine-tune (TPR@0.5 0.46) and 21 Sep from-scratch on 3 m + lookalike + 10 min noise (TPR@0.5 **0.455**, best in-train TPR@0.55 **0.368**). Export still requires TPR@0.5 ≥ **0.67**. `models/marvin.keras` on disk may be a **refused** checkpoint — the flashed graph is `models/marvin.int8.tflite` (20 Sep 22:46 IST).
 2. Measure live TPR and live FAR at the **deployed** 0.65 / 3 / 3 knobs, 1 m and 3 m, more than one speaker. Disk now has 40 `mayank3m` and 80 `mayank1m` clips; `tuning.json` is still the older 290-clip sweep.
 3. Measure keyword-end → first KWS1 byte with `server/latency_harness.py`.
 4. Always-on tiny keyword net: not shipped (idle CPU). Data (3 m, lookalikes, room noise) is the current accuracy lever.
