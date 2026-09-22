@@ -6,12 +6,14 @@
 //   milliseconds, so it cannot run inside the audio loop.
 //
 // Idle (no speech): capture + RMS + cheap gate + ring push. Target < 10% CPU.
-// Wake-word audio is never sent anywhere; only post-wake audio opens KWS1.
+// The wake clip and its score trail go out on USB serial (W / TRAIL lines).
+// Only post-wake audio opens the KWS1 stream to the Pi.
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -20,6 +22,7 @@
 
 #include "energy_gate.h"
 #include "kws.h"
+#include "kws_verify.h"
 #include "oled.h"
 #include "pins.h"
 #include "wifi_secrets.h"
@@ -61,6 +64,20 @@ static uint32_t g_last_mfcc_us = 0;
 static uint32_t g_last_invoke_us = 0;
 static uint32_t g_wake_count = 0;
 static float g_idle_cpu = 0.0f;
+
+// Once-a-second listen diagnostic. The hop loop only stores integers.
+// The print runs on the inference core so it is outside idle-CPU accounting.
+static std::atomic<uint32_t> g_diag_invokes{0};
+static std::atomic<uint32_t> g_diag_max_milli{0};
+static std::atomic<uint32_t> g_diag_rms_milli{0};
+static std::atomic<uint32_t> g_diag_open{0};
+
+static void diag_note_score(float score) {
+  uint32_t milli = score > 0.0f ? (uint32_t)(score * 1000.0f + 0.5f) : 0;
+  uint32_t cur = g_diag_max_milli.load();
+  while (milli > cur && !g_diag_max_milli.compare_exchange_weak(cur, milli)) {
+  }
+}
 static uint32_t g_last_lat_ms = 0;
 static uint32_t g_wake_detect_ms = 0;
 
@@ -69,9 +86,12 @@ static bool g_mic_monitor = false;
 static bool g_capture = false;
 static float g_mic_peak = 0.0f;
 static int32_t g_mic_dc = 0;
+static int g_i2s_slot = 0;
+static float g_slot_rms_a = 0.0f;
+static float g_slot_rms_b = 0.0f;
 
 static void log_line(const char *fmt, ...) {
-  char buf[192];
+  char buf[512];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -245,15 +265,25 @@ static float hop_capture(int16_t *hop_out) {
   g_i2s_wait_us = micros() - tw;
   const int n = (int)(nr / sizeof(int32_t));
   int got = 0;
-  int64_t sum = 0;
+  int64_t energy_a = 0;
+  int64_t energy_b = 0;
   for (int i = 0; i + 1 < n && got < HOP_SAMPLES; i += 2) {
-    // Try both stereo slots: INMP441 L/R=GND is left, but IDF RIGHT_LEFT
-    // packing and a high L/R pin both put energy on the other slot.
     const int32_t a24 = rx[i] >> 8;
     const int32_t b24 = rx[i + 1] >> 8;
-    const int32_t am = a24 < 0 ? -a24 : a24;
-    const int32_t bm = b24 < 0 ? -b24 : b24;
-    const int32_t s24 = (am >= bm) ? a24 : b24;
+    energy_a += (int64_t)a24 * (int64_t)a24;
+    energy_b += (int64_t)b24 * (int64_t)b24;
+    got++;
+  }
+  // One slot for the whole hop. Picking the louder sample each step splices
+  // the empty channel into silence and turns any word into a keyword-like hash.
+  const bool use_b = energy_b > energy_a;
+  g_i2s_slot = use_b ? 1 : 0;
+  g_slot_rms_a = sqrtf((float)energy_a / (float)(got > 0 ? got : 1)) / 8388608.0f;
+  g_slot_rms_b = sqrtf((float)energy_b / (float)(got > 0 ? got : 1)) / 8388608.0f;
+  int64_t sum = 0;
+  got = 0;
+  for (int i = 0; i + 1 < n && got < HOP_SAMPLES; i += 2) {
+    const int32_t s24 = use_b ? (rx[i + 1] >> 8) : (rx[i] >> 8);
     g_hop_raw[got++] = s24;
     sum += s24;
   }
@@ -294,10 +324,29 @@ static float hop_capture(int16_t *hop_out) {
 
 // --- inference on core 0 (Arduino loopTask is on core 1) ---------------------
 
+static void diag_task(void *) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    const uint32_t invokes = g_diag_invokes.exchange(0);
+    const uint32_t max_m = g_diag_max_milli.exchange(0);
+    const uint32_t rms_m = g_diag_rms_milli.load();
+    const bool open = g_diag_open.load() != 0;
+    char line[128];
+    snprintf(line, sizeof(line),
+             "DIAG1 t=%u gate=%s rms=%.3f thr=%.3f invokes=%u max_pkw=%.3f",
+             (unsigned)millis(), open ? "open" : "closed", rms_m / 1000.0f,
+             (double)ENERGY_RMS_THRESHOLD, (unsigned)invokes, max_m / 1000.0f);
+    Serial.println(line);
+    Serial0.println(line);
+  }
+}
+
 static void kws_task(void *) {
   for (;;) {
     xSemaphoreTake(g_infer_go, portMAX_DELAY);
     g_infer_out = kws_infer_clip(g_infer_clip);
+    g_diag_invokes.fetch_add(1);
+    diag_note_score(g_infer_out.score);
     __sync_synchronize();
     g_infer_fresh = true;
     g_infer_busy = false;
@@ -316,7 +365,9 @@ static void clip_match_train_level(int16_t *clip, int n) {
     acc += (double)f * f;
   }
   const float rms = (float)sqrt(acc / (double)n);
-  if (rms < 0.008f) {
+  // Room tone after gain 6 sits near 0.04. Boosting that back to 0.10
+  // made hiss look like the close-mic keyword. Only lift real speech.
+  if (rms < 0.070f) {
     return;
   }
   const float target = 0.10f;
@@ -324,8 +375,8 @@ static void clip_match_train_level(int16_t *clip, int n) {
   if (g <= 1.05f) {
     return;
   }
-  if (g > 10.0f) {
-    g = 10.0f;
+  if (g > 2.0f) {
+    g = 2.0f;
   }
   for (int i = 0; i < n; ++i) {
     int y = (int)lroundf((float)clip[i] * g);
@@ -451,9 +502,9 @@ static const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 
 // One hop as `A <base64>`. tools/record_s3.py reassembles these into WAVs, so
 // dataset clips come through the real mic without needing WiFi or the Pi.
-static void emit_hop_b64(const int16_t *hop) {
-  const uint8_t *src = (const uint8_t *)hop;
-  const int n = HOP_SAMPLES * 2;
+static void emit_pcm_b64(char tag, const int16_t *pcm, int samples) {
+  const uint8_t *src = (const uint8_t *)pcm;
+  const int n = samples * 2;
   char out[((HOP_SAMPLES * 2 + 2) / 3) * 4 + 4];
   int o = 0;
   for (int i = 0; i < n; i += 3) {
@@ -467,10 +518,69 @@ static void emit_hop_b64(const int16_t *hop) {
     out[o++] = (i + 2 < n) ? kB64[v & 0x3f] : '=';
   }
   out[o] = 0;
-  Serial.print("A ");
+  Serial.print(tag);
+  Serial.print(' ');
   Serial.println(out);
-  Serial0.print("A ");
+  Serial0.print(tag);
+  Serial0.print(' ');
   Serial0.println(out);
+}
+
+static void emit_hop_b64(const int16_t *hop) {
+  emit_pcm_b64('A', hop, HOP_SAMPLES);
+}
+
+// Wake audio is copied out of g_infer_clip because the next inference overwrites it.
+static int16_t g_wake_pcm[CLIP_SAMPLES];
+static int g_wake_off = -1;
+static uint32_t g_wake_pcm_t = 0;
+
+static void wake_clip_arm(uint32_t t_ms) {
+  memcpy(g_wake_pcm, g_infer_clip, sizeof(g_wake_pcm));
+  g_wake_off = 0;
+  g_wake_pcm_t = t_ms;
+  log_line("WAKECLIP t=%u samples=%d", (unsigned)t_ms, CLIP_SAMPLES);
+}
+
+// Extra inferences after the wake decision, so the saved trail can show the
+// score falling once the word leaves the window. Does not change the decision.
+static int g_post_left = 0;
+
+static void log_trail(uint32_t t_ms, bool post) {
+  float pkw[16], pun[16], psil[16];
+  const int n = kws_copy_trail(pkw, pun, psil, 16);
+  char kw[8 * 16], un[8 * 16], sil[8 * 16];
+  kw[0] = un[0] = sil[0] = 0;
+  for (int i = 0; i < n; ++i) {
+    char one[16];
+    snprintf(one, sizeof(one), "%s%.3f", i ? "," : "", (double)pkw[i]);
+    strncat(kw, one, sizeof(kw) - strlen(kw) - 1);
+    snprintf(one, sizeof(one), "%s%.3f", i ? "," : "", (double)pun[i]);
+    strncat(un, one, sizeof(un) - strlen(un) - 1);
+    snprintf(one, sizeof(one), "%s%.3f", i ? "," : "", (double)psil[i]);
+    strncat(sil, one, sizeof(sil) - strlen(sil) - 1);
+  }
+  log_line("TRAIL t=%u n=%d pkw=%s pun=%s psil=%s%s", (unsigned)t_ms, n, kw, un, sil,
+           post ? " post=1" : "");
+}
+
+static void wake_clip_pump() {
+  if (g_wake_off < 0 || g_capture) {
+    return;
+  }
+  const int left = CLIP_SAMPLES - g_wake_off;
+  // Hold the last hop until the post-wake scores are logged, so the collector
+  // stores the longer trail. Give up after 2.5 s so a stuck infer still finishes.
+  if (left <= HOP_SAMPLES && g_post_left > 0 && millis() - g_wake_pcm_t < 2500) {
+    return;
+  }
+  const int n = left > HOP_SAMPLES ? HOP_SAMPLES : left;
+  emit_pcm_b64('W', g_wake_pcm + g_wake_off, n);
+  g_wake_off += n;
+  if (g_wake_off >= CLIP_SAMPLES) {
+    g_wake_off = -1;
+    log_line("WAKECLIP end t=%u", (unsigned)g_wake_pcm_t);
+  }
 }
 
 static void print_status() {
@@ -624,6 +734,9 @@ void setup() {
              (unsigned)kws_model_bytes(),
              (unsigned)kws_arena_used(),
              (unsigned)KWS_ARENA_BYTES);
+    boot_step("verify stage");
+    kws_verify_begin();
+
     boot_step("first inference (warm-up)");
     // Run once here, on a known-quiet buffer, so a fault in the kernels shows up
     // at boot with a log line next to it instead of mid-demo.
@@ -638,6 +751,7 @@ void setup() {
   } else {
     log_line("tflm FAILED — node will capture but never wake");
   }
+  xTaskCreatePinnedToCore(diag_task, "diag", 3072, nullptr, 1, nullptr, KWS_TASK_CORE);
   log_line("serial: MIC (mic monitor) | REC/STOP (clip capture) | STATUS | BENCH");
   log_line("boot: done");
   Serial.flush();
@@ -645,6 +759,7 @@ void setup() {
 
 void loop() {
   poll_serial();
+  wake_clip_pump();
 
   static int16_t hop[HOP_SAMPLES];
   const uint32_t t0 = micros();
@@ -664,8 +779,9 @@ void loop() {
     static uint32_t last_mic = 0;
     if (millis() - last_mic >= 250) {
       last_mic = millis();
-      log_line("MIC rms=%.6f peak=%.4f dc=%.1f floor=%.5f speech=%.2f",
-               rms, g_mic_peak, (double)g_mic_dc, g_gate.noise_floor, g_gate.last_speech_ratio);
+      log_line("MIC rms=%.6f peak=%.4f dc=%.1f floor=%.5f speech=%.2f slot=%d a=%.4f b=%.4f",
+               rms, g_mic_peak, (double)g_mic_dc, g_gate.noise_floor, g_gate.last_speech_ratio,
+               g_i2s_slot, g_slot_rms_a, g_slot_rms_b);
     }
   }
 
@@ -674,8 +790,14 @@ void loop() {
   wifi_up();
 
   const bool maybe_word = energy_gate_update(&g_gate, hop, HOP_SAMPLES, rms);
+  g_diag_open.store(maybe_word ? 1 : 0);
+  g_diag_rms_milli.store((uint32_t)(rms * 1000.0f + 0.5f));
 
   const char *state = "listen";
+
+  if (g_post_left > 0 && g_kws_ready && g_ring_fill >= CLIP_SAMPLES) {
+    infer_request();
+  }
 
   if (g_streaming) {
     state = "wake";
@@ -690,7 +812,7 @@ void loop() {
   } else if (g_kws_ready && maybe_word && g_ring_fill >= CLIP_SAMPLES &&
              millis() - g_last_wake_ms >= REFRACTORY_MS) {
     // Still LISTEN: looking for marvin. No bytes leave the chip.
-    if (g_speech_hops == 0) {
+    if (g_speech_hops == 0 && g_post_left == 0) {
       kws_reset();
     }
     g_speech_hops++;
@@ -709,17 +831,34 @@ void loop() {
     g_kw = r.score;
     g_last_mfcc_us = r.mfcc_us;
     g_last_invoke_us = r.invoke_us;
-    if (r.awake && !g_streaming && millis() - g_last_wake_ms >= REFRACTORY_MS) {
+    const bool candidate = (r.awake || r.rejected) && !g_streaming &&
+                           millis() - g_last_wake_ms >= REFRACTORY_MS;
+    if (candidate && r.rejected) {
+      log_line("REJECT t=%u score=%.3f pkw=%.3f pun=%.3f psil=%.3f",
+               (unsigned)millis(), r.score, r.p_keyword, r.p_unknown, r.p_silence);
+      log_trail((unsigned)millis(), false);
+      g_post_left = 8;
+      wake_clip_arm((unsigned)millis());
+      g_last_wake_ms = millis();
+    } else if (candidate) {
       g_wake_count++;
       g_wake_detect_ms = millis();
       // Timestamped on the node so tools/far_test.py can align serial with audio.
       log_line("WAKE t=%u score=%.3f pkw=%.3f pun=%.3f psil=%.3f mfcc_us=%u inv_us=%u",
                (unsigned)millis(), r.score, r.p_keyword, r.p_unknown, r.p_silence,
                (unsigned)r.mfcc_us, (unsigned)r.invoke_us);
+      log_trail((unsigned)millis(), false);
+      g_post_left = 8;
+      wake_clip_arm((unsigned)millis());
       state = "wake";
       g_oled_wake_until = millis() + 2500;
       if (!stream_begin()) {
         g_last_wake_ms = millis();
+      }
+    } else if (g_post_left > 0) {
+      g_post_left--;
+      if (g_post_left == 0) {
+        log_trail((unsigned)millis(), true);
       }
     }
   }

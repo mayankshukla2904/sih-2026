@@ -5,6 +5,9 @@
 
 struct KwsResult {
   bool awake;
+  // First model said keyword, second model said no. The clip is still logged.
+  // The stream to the Pi does not open.
+  bool rejected;
   float score;  // smoothed p_keyword
   float p_keyword;
   float p_unknown;
@@ -21,6 +24,9 @@ void kws_reset();
 
 // clip is CLIP_SAMPLES int16 samples at 16 kHz.
 KwsResult kws_infer_clip(const int16_t *clip);
+
+// Oldest-first scores since the last kws_reset, up to maxn.
+int kws_copy_trail(float *pkw, float *pun, float *psil, int maxn);
 
 // For the boot banner and the deck: arena high-water mark and model size.
 size_t kws_arena_used();

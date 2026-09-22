@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "kws_model.h"
+#include "kws_verify.h"
 #include "mfcc.h"
 #include "pins.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -36,6 +37,14 @@ static float g_scores[SMOOTH_WINDOW];
 static int g_n = 0;
 static int g_pos = 0;
 static int g_hits = 0;
+
+// One entry per inference while the gate is open. Printed on wake so a false
+// accept keeps its score trail, not only the final number.
+static constexpr int kTrail = 16;
+static float g_trail_kw[kTrail];
+static float g_trail_un[kTrail];
+static float g_trail_sil[kTrail];
+static int g_trail_n = 0;
 
 bool kws_begin() {
   const tflite::Model *model = tflite::GetModel(KWS_MODEL);
@@ -90,6 +99,20 @@ void kws_reset() {
   g_n = 0;
   g_pos = 0;
   g_hits = 0;
+  g_trail_n = 0;
+}
+
+int kws_copy_trail(float *pkw, float *pun, float *psil, int maxn) {
+  const int stored = g_trail_n < kTrail ? g_trail_n : kTrail;
+  const int n = stored < maxn ? stored : maxn;
+  const int begin = g_trail_n - n;
+  for (int i = 0; i < n; ++i) {
+    const int j = (begin + i) % kTrail;
+    pkw[i] = g_trail_kw[j];
+    pun[i] = g_trail_un[j];
+    psil[i] = g_trail_sil[j];
+  }
+  return n;
 }
 
 size_t kws_arena_used() {
@@ -136,6 +159,13 @@ KwsResult kws_infer_clip(const int16_t *clip) {
   r.p_keyword = ((float)out[0] - g_out_zp) * g_out_scale;
   r.p_unknown = ((float)out[1] - g_out_zp) * g_out_scale;
   r.p_silence = ((float)out[2] - g_out_zp) * g_out_scale;
+  const int slot = g_trail_n % kTrail;
+  g_trail_kw[slot] = r.p_keyword;
+  g_trail_un[slot] = r.p_unknown;
+  g_trail_sil[slot] = r.p_silence;
+  if (g_trail_n < 100000) {
+    g_trail_n++;
+  }
 
   g_scores[g_pos] = r.p_keyword;
   g_pos = (g_pos + 1) % SMOOTH_WINDOW;
@@ -148,11 +178,20 @@ KwsResult kws_infer_clip(const int16_t *clip) {
   }
   r.score = sum / (float)g_n;
 
-  if (r.score >= WAKE_SCORE_THRESHOLD && r.p_keyword >= r.p_unknown + KWS_MARGIN) {
+  if (r.score >= WAKE_SCORE_THRESHOLD && r.p_keyword >= r.p_unknown + KWS_MARGIN &&
+      r.p_keyword >= r.p_silence) {
     g_hits++;
   } else {
     g_hits = 0;
   }
   r.awake = (g_hits >= DEBOUNCE_HITS);
+  r.rejected = false;
+  // The verifier only sees clips the first model already called a keyword.
+  // It cannot recover a marvin the first model missed. A rejection still
+  // leaves `rejected` set so the clip and score trail are saved.
+  if (r.awake && !kws_verify_feats(g_feats, MFCC_FEAT_LEN)) {
+    r.awake = false;
+    r.rejected = true;
+  }
   return r;
 }
