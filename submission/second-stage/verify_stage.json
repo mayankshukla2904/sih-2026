@@ -1,0 +1,204 @@
+{
+  "view": "frame-delta of the 49x10 MFCC, shape 48x10. Stage 1 still sees the MFCC.",
+  "candidate_rule": "pkw>=0.65 and pkw>=pun+0.08 and pkw>=psil; false_wake_real counted as candidates because the device woke",
+  "train_scope": "first-stage candidates only, false wakes split within their recording day",
+  "train_candidates": {
+    "keyword": 107,
+    "reject": 189
+  },
+  "holdout_buckets": [
+    {
+      "group": "1m",
+      "holdout_session": "2026-09-01",
+      "n": 80,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-01"
+      ]
+    },
+    {
+      "group": "3m",
+      "holdout_session": "2026-09-21",
+      "n": 40,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-21"
+      ]
+    },
+    {
+      "group": "close",
+      "holdout_session": "2026-09-20",
+      "n": 30,
+      "train_n": 180,
+      "sessions": [
+        "2026-08-31",
+        "2026-09-01",
+        "2026-09-20"
+      ]
+    },
+    {
+      "group": "martin",
+      "holdout_session": "2026-09-21",
+      "n": 15,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-21"
+      ]
+    },
+    {
+      "group": "marvel",
+      "holdout_session": "2026-09-21",
+      "n": 15,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-21"
+      ]
+    },
+    {
+      "group": "carbon",
+      "holdout_session": "2026-09-21",
+      "n": 15,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-21"
+      ]
+    },
+    {
+      "group": "light",
+      "holdout_session": "2026-09-22",
+      "n": 15,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-22"
+      ]
+    },
+    {
+      "group": "water",
+      "holdout_session": "2026-09-22",
+      "n": 15,
+      "train_n": 0,
+      "sessions": [
+        "2026-09-22"
+      ]
+    },
+    {
+      "group": "false",
+      "holdout_session": "latest 20% of the only day, by wake time",
+      "n": 47,
+      "train_n": 187,
+      "sessions": [
+        "2026-09-22"
+      ],
+      "split": "within_day_latest"
+    },
+    {
+      "group": "unknown",
+      "holdout_session": "2026-09-21",
+      "n": 40,
+      "train_n": 149,
+      "sessions": [
+        "2026-08-31",
+        "2026-09-01",
+        "2026-09-20",
+        "2026-09-21"
+      ]
+    }
+  ],
+  "accept_advisory": false,
+  "single_day_groups": 7,
+  "exported": "/Users/jl-mayank/sih 2026/firmware/include/kws_verify_model.h",
+  "holdout_keyword_n": 150,
+  "holdout_false_candidates": 48,
+  "stage1_keyword_tpr": 0.26,
+  "stage1_and_stage2_keyword_tpr": 0.2533,
+  "stage2_far_on_false_candidates": 0.1042,
+  "confuser_candidate_reject": 0.8958,
+  "chosen_margin": -0.05,
+  "margin_sweep": [
+    {
+      "margin": -0.1,
+      "stage1_and_stage2_keyword_tpr": 0.2533,
+      "confuser_candidate_accept": 0.125,
+      "confuser_candidate_reject": 0.875,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": true
+    },
+    {
+      "margin": -0.05,
+      "stage1_and_stage2_keyword_tpr": 0.2533,
+      "confuser_candidate_accept": 0.1042,
+      "confuser_candidate_reject": 0.8958,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": true
+    },
+    {
+      "margin": 0.0,
+      "stage1_and_stage2_keyword_tpr": 0.2333,
+      "confuser_candidate_accept": 0.0833,
+      "confuser_candidate_reject": 0.9167,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    },
+    {
+      "margin": 0.05,
+      "stage1_and_stage2_keyword_tpr": 0.2267,
+      "confuser_candidate_accept": 0.0208,
+      "confuser_candidate_reject": 0.9792,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    },
+    {
+      "margin": 0.1,
+      "stage1_and_stage2_keyword_tpr": 0.2267,
+      "confuser_candidate_accept": 0.0208,
+      "confuser_candidate_reject": 0.9792,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    },
+    {
+      "margin": 0.15,
+      "stage1_and_stage2_keyword_tpr": 0.2267,
+      "confuser_candidate_accept": 0.0,
+      "confuser_candidate_reject": 1.0,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    },
+    {
+      "margin": 0.2,
+      "stage1_and_stage2_keyword_tpr": 0.2133,
+      "confuser_candidate_accept": 0.0,
+      "confuser_candidate_reject": 1.0,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    },
+    {
+      "margin": 0.3,
+      "stage1_and_stage2_keyword_tpr": 0.1933,
+      "confuser_candidate_accept": 0.0,
+      "confuser_candidate_reject": 1.0,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    },
+    {
+      "margin": 0.4,
+      "stage1_and_stage2_keyword_tpr": 0.18,
+      "confuser_candidate_accept": 0.0,
+      "confuser_candidate_reject": 1.0,
+      "unknown_candidate_accept": 0.0,
+      "tpr_ok": false
+    }
+  ],
+  "material_reject": 0.1,
+  "metric_pass": true,
+  "accept": true,
+  "rule": "keyword TPR drops by at most 0.02, confuser-candidate rejection >= 0.10, every holdout bucket n>=10",
+  "ops": [
+    "CONV_2D",
+    "FULLY_CONNECTED",
+    "MEAN",
+    "SOFTMAX"
+  ],
+  "bytes": 2616,
+  "int8_keyword_tpr": 0.2533,
+  "int8_confuser_reject": 0.8958
+}
